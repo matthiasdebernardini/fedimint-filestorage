@@ -126,6 +126,7 @@ impl ModuleGen for DummyConfigGenerator {
             .to_client_config())
     }
 
+    // a comment
     fn to_client_config_from_consensus_value(
         &self,
         config: serde_json::Value,
