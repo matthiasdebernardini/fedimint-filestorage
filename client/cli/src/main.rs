@@ -12,6 +12,9 @@ use fedimint_api::db::Database;
 use fedimint_api::task::TaskGroup;
 use fedimint_api::{Amount, NumPeers, OutPoint, TieredMulti, TransactionId};
 use fedimint_core::config::load_from_file;
+use fedimint_core::modules::dummy::config::{
+    DummyConfig, DummyConfigConsensus, DummyConfigPrivate,
+};
 use fedimint_core::modules::ln::contracts::ContractId;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
 use mint_client::api::{WsFederationApi, WsFederationConnect};
@@ -30,6 +33,9 @@ use tracing_subscriber::EnvFilter;
 #[serde(rename_all(serialize = "snake_case"))]
 #[serde(untagged)]
 enum CliOutput {
+    Dummy {
+        success: bool,
+    },
     VersionHash {
         hash: String,
     },
@@ -195,6 +201,7 @@ enum CommandNoWorkdir {
 }
 #[derive(Subcommand)]
 enum Command {
+    Dummy,
     /// Print the latest git commit hash this bin. was build with
     VersionHash,
     /// Generate a new peg-in address, funds sent to it can later be claimed
@@ -242,7 +249,9 @@ enum Command {
     },
 
     /// Pay a lightning invoice via a gateway
-    LnPay { bolt11: lightning_invoice::Invoice },
+    LnPay {
+        bolt11: lightning_invoice::Invoice,
+    },
 
     /// Fetch (re-)issued notes and finalize issuance process
     Fetch,
@@ -259,16 +268,22 @@ enum Command {
     },
 
     /// Wait for incoming invoice to be paid
-    WaitInvoice { invoice: lightning_invoice::Invoice },
+    WaitInvoice {
+        invoice: lightning_invoice::Invoice,
+    },
 
     /// Wait for the fed to reach a consensus block height
-    WaitBlockHeight { height: u64 },
+    WaitBlockHeight {
+        height: u64,
+    },
 
     /// Config enabling client to establish websocket connection to federation
     ConnectInfo,
 
     /// Join a federation using it's ConnectInfo
-    JoinFederation { connect: String },
+    JoinFederation {
+        connect: String,
+    },
 
     /// List registered gateways
     ListGateways,
@@ -420,6 +435,16 @@ async fn handle_command(
 ) -> CliResult {
     let mut task_group = TaskGroup::new();
     match cli.command {
+        Command::Dummy => {
+            let a = DummyConfig {
+                private: DummyConfigPrivate {
+                    something_private: 5,
+                },
+                consensus: DummyConfigConsensus { something: 2 },
+            };
+
+            Ok(CliOutput::Dummy { success: true })
+        }
         Command::Api { method, arg } => {
             let arg: Value = serde_json::from_str(&arg).unwrap();
             let ws_api = WsFederationApi::from_config(client.config().as_ref());

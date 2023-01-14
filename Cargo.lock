@@ -1034,6 +1034,7 @@ dependencies = [
  "bitcoin",
  "bitcoin_hashes 0.11.0",
  "fedimint-api",
+ "fedimint-dummy",
  "fedimint-ln",
  "fedimint-mint",
  "fedimint-wallet",
