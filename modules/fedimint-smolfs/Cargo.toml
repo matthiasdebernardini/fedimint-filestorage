@@ -1,5 +1,5 @@
 [package]
-name = "fedimint-dummy"
+name = "fedimint-smolfs"
 version = "0.1.0"
 authors = ["The Fedimint Developers"]
 edition = "2021"
@@ -7,7 +7,7 @@ description = "fedimint-dummy is a dummy example fedimint module."
 license = "MIT"
 
 [lib]
-name = "fedimint_dummy"
+name = "fedimint-smolfs"
 path = "src/lib.rs"
 
 [dependencies]

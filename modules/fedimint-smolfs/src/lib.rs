@@ -122,7 +122,7 @@ impl ModuleGen for DummyConfigGenerator {
                 merkle_root: vec![],
             },
         };
-        // copy wallet module to give pubkeys to all fed members
+
 
         Ok(Ok(server.to_erased()))
     }
