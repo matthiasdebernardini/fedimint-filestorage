@@ -75,7 +75,7 @@ const KIND: ModuleKind = ModuleKind::from_static_str("wallet");
 
 pub const CONFIRMATION_TARGET: u16 = 10;
 
-pub type PartialSig = Vec<u8>;
+// pub type PartialSig = Vec<u8>;
 
 pub type PegInDescriptor = Descriptor<CompressedPublicKey>;
 
