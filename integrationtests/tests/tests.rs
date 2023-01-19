@@ -14,7 +14,7 @@ use fedimint_api::task::TaskGroup;
 use fedimint_api::{msats, sats, TieredMulti};
 use fedimint_ln::contracts::{Preimage, PreimageDecryptionShare};
 use fedimint_ln::LightningConsensusItem;
-use fedimint_mint::{MintOutputConfirmation, OutputConfirmationSignatures};
+use fedimint_mint::{MintConsensusItem, MintOutputSignatureShare};
 use fedimint_server::consensus::TransactionSubmissionError::TransactionError;
 use fedimint_server::epoch::ConsensusItem;
 use fedimint_server::transaction::legacy::Output;
@@ -396,9 +396,9 @@ async fn drop_peers_who_contribute_bad_sigs() -> Result<()> {
         let bad_proposal = vec![ConsensusItem::Module(
             fedimint_api::core::DynModuleConsensusItem::from_typed(
                 LEGACY_HARDCODED_INSTANCE_ID_MINT,
-                MintOutputConfirmation {
+                MintConsensusItem {
                     out_point,
-                    signatures: OutputConfirmationSignatures(TieredMulti::default()),
+                    signatures: MintOutputSignatureShare(TieredMulti::default()),
                 },
             ),
         )];
@@ -439,7 +439,7 @@ async fn lightning_gateway_pays_internal_invoice() -> Result<()> {
             .fund_outgoing_ln_contract(invoice, rng())
             .await
             .unwrap();
-        fed.run_consensus_epochs(2).await; // send coins to LN contract
+        fed.run_consensus_epochs(1).await; // send coins to LN contract
 
         let contract_account = user
             .client
@@ -510,6 +510,7 @@ async fn lightning_gateway_pays_outgoing_invoice() -> Result<()> {
         let invoice = lightning.invoice(sats(1000), None).await;
 
         fed.mine_and_mint(&user, &*bitcoin, sats(2000)).await;
+
         let (contract_id, outpoint) = user
             .client
             .fund_outgoing_ln_contract(invoice, rng())
@@ -576,7 +577,7 @@ async fn lightning_gateway_claims_refund_for_internal_invoice() -> Result<()> {
             .fund_outgoing_ln_contract(invoice, rng())
             .await
             .unwrap();
-        fed.run_consensus_epochs(2).await; // send coins to LN contract
+        fed.run_consensus_epochs(1).await; // send coins to LN contract
 
         let contract_account = user
             .client

@@ -21,7 +21,6 @@ use fedimint_core::outcome::TransactionStatus;
 use futures::future::select_all;
 use hbbft::honey_badger::Batch;
 use itertools::Itertools;
-use rand::rngs::OsRng;
 use thiserror::Error;
 use tokio::sync::Notify;
 use tracing::{debug, error, info_span, instrument, trace, warn, Instrument};
@@ -32,9 +31,7 @@ use crate::db::{
     AcceptedTransactionKey, DropPeerKey, DropPeerKeyPrefix, EpochHistoryKey, LastEpochKey,
     ProposedTransactionKey, ProposedTransactionKeyPrefix, RejectedTransactionKey,
 };
-use crate::rng::RngGenerator;
 use crate::transaction::{Transaction, TransactionError};
-use crate::OsRngGen;
 
 pub type HbbftSerdeConsensusOutcome = hbbft::honey_badger::Batch<Vec<SerdeConsensusItem>, PeerId>;
 pub type HbbftConsensusOutcome = hbbft::honey_badger::Batch<Vec<ConsensusItem>, PeerId>;
@@ -69,8 +66,6 @@ pub struct ConsensusProposal {
 // TODO: we should make other fields private and get rid of this
 #[non_exhaustive]
 pub struct FedimintConsensus {
-    /// Cryptographic random number generator used for everything
-    pub rng_gen: Box<dyn RngGenerator<Rng = OsRng>>,
     /// Configuration describing the federation and containing our secrets
     pub cfg: ServerConfig,
 
@@ -109,7 +104,6 @@ impl FedimintConsensus {
         task_group: &mut TaskGroup,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            rng_gen: Box::new(OsRngGen),
             modules: module_inits.init_all(&cfg, &db, task_group).await?,
             cfg,
             module_inits,
@@ -126,7 +120,6 @@ impl FedimintConsensus {
         modules: ModuleRegistry<DynServerModule>,
     ) -> Self {
         Self {
-            rng_gen: Box::new(OsRngGen),
             modules,
             cfg,
             module_inits,
@@ -177,7 +170,7 @@ impl FedimintConsensus {
         let mut dbtx = self.db.begin_transaction().await;
 
         for input in &transaction.inputs {
-            let module = self.modules.get(input.module_instance_id());
+            let module = self.modules.get_expect(input.module_instance_id());
 
             let cache = module.build_verification_cache(&[input.clone()]);
             let interconnect = self.build_interconnect();
@@ -194,7 +187,7 @@ impl FedimintConsensus {
         for output in &transaction.outputs {
             let amount = self
                 .modules
-                .get(output.module_instance_id())
+                .get_expect(output.module_instance_id())
                 .validate_output(&mut dbtx, output)
                 .await
                 .map_err(|e| TransactionSubmissionError::ModuleError(tx_hash, e))?;
@@ -231,8 +224,6 @@ impl FedimintConsensus {
         reference_rejected_txs: &Option<BTreeSet<TransactionId>>,
     ) -> SignedEpochOutcome {
         let epoch = consensus_outcome.epoch;
-        let epoch_peers: HashSet<PeerId> =
-            consensus_outcome.contributions.keys().copied().collect();
         let outcome = consensus_outcome.clone();
 
         let UnzipConsensusItem {
@@ -245,116 +236,40 @@ impl FedimintConsensus {
             .flat_map(|(peer, cis)| cis.into_iter().map(move |ci| (peer, ci)))
             .unzip_consensus_item();
 
-        // Begin consensus epoch
-        {
-            let per_module_cis: HashMap<
-                ModuleInstanceId,
-                Vec<(PeerId, fedimint_api::core::DynModuleConsensusItem)>,
-            > = module_cis
-                .into_iter()
-                .into_group_map_by(|(_peer, mci)| mci.module_instance_id());
-
-            let mut dbtx = self.db.begin_transaction().await;
-            for (module_key, module_cis) in per_module_cis {
-                self.modules
-                    .get(module_key)
-                    .begin_consensus_epoch(&mut dbtx, module_cis)
-                    .await;
-            }
-
-            dbtx.commit_tx().await.expect("DB Error");
-        }
-
-        // Process transactions
-        let mut rejected_txs: BTreeSet<TransactionId> = BTreeSet::new();
-        {
+        let epoch_history = loop {
             let mut dbtx = self.db.begin_transaction().await;
 
-            let caches = self.build_verification_caches(transaction_cis.iter().map(|(_, tx)| tx));
-            let mut processed_txs: HashSet<TransactionId> = HashSet::new();
-
-            for (_, transaction) in transaction_cis {
-                let txid: TransactionId = transaction.tx_hash();
-                if !processed_txs.insert(txid) {
-                    // Avoid processing duplicate tx from different peers
-                    continue;
-                }
-
-                let span = info_span!("Processing transaction");
-                async {
-                    trace!(?transaction);
-                    dbtx.remove_entry(&ProposedTransactionKey(txid))
-                        .await
-                        .expect("DB Error");
-
-                    dbtx.set_tx_savepoint().await;
-                    // TODO: use borrowed transaction
-                    match self
-                        .process_transaction(&mut dbtx, transaction.clone(), &caches)
-                        .await
-                    {
-                        Ok(()) => {
-                            dbtx.insert_entry(
-                                &AcceptedTransactionKey(txid),
-                                &AcceptedTransaction { epoch, transaction },
-                            )
-                            .await
-                            .expect("DB Error");
-                        }
-                        Err(error) => {
-                            rejected_txs.insert(txid);
-                            dbtx.rollback_tx_to_savepoint().await;
-                            warn!(%error, "Transaction failed");
-                            dbtx.insert_entry(
-                                &RejectedTransactionKey(txid),
-                                &format!("{:?}", error),
-                            )
-                            .await
-                            .expect("DB Error");
-                        }
-                    }
-                }
-                .instrument(span)
+            self.process_module_consensus_items(&mut dbtx, &module_cis)
                 .await;
+
+            let rejected_txs = self
+                .process_transactions(&mut dbtx, epoch, &transaction_cis)
+                .await;
+
+            if let Some(reference_rejected_txs) = reference_rejected_txs.as_ref() {
+                // Result of the consensus are supposed to be deterministic.
+                // If our result is not the same as what the (honest) majority of the federation
+                // signed over, it's a catastrophical bug/mismatch of Federation's fedimintd
+                // implementations.
+                assert_eq!(
+                    reference_rejected_txs, &rejected_txs,
+                    "rejected_txs mismatch: reference = {:?} != {:?}",
+                    reference_rejected_txs, rejected_txs
+                );
             }
-            dbtx.commit_tx().await.expect("DB Error");
-        }
-
-        if let Some(reference_rejected_txs) = reference_rejected_txs.as_ref() {
-            // Result of the consensus are supposed to be deterministic.
-            // If our result is not the same as what the (honest) majority of the federation
-            // signed over, it's a catastrophical bug/mismatch of Federation's fedimintd
-            // implementations.
-            assert_eq!(
-                reference_rejected_txs, &rejected_txs,
-                "rejected_txs mismatch: reference = {:?} != {:?}",
-                reference_rejected_txs, rejected_txs
-            );
-        }
-
-        // End consensus epoch
-        let epoch_history = {
-            let mut dbtx = self.db.begin_transaction().await;
-            let mut drop_peers = Vec::<PeerId>::new();
 
             let epoch_history = self
-                .save_epoch_history(outcome, &mut dbtx, &mut drop_peers, rejected_txs)
+                .finalize_process_epoch(&mut dbtx, outcome.clone(), rejected_txs)
                 .await;
 
-            for (_, module) in self.modules.iter_modules() {
-                let module_drop_peers = module.end_consensus_epoch(&epoch_peers, &mut dbtx).await;
-                drop_peers.extend(module_drop_peers);
+            match dbtx.commit_tx().await {
+                Ok(()) => {
+                    break epoch_history;
+                }
+                Err(error) => {
+                    error!(%error, "Committing DB transaction failed, retrying!");
+                }
             }
-
-            for peer in drop_peers {
-                dbtx.insert_entry(&DropPeerKey(peer), &())
-                    .await
-                    .expect("DB Error");
-            }
-
-            dbtx.commit_tx().await.expect("DB Error");
-
-            epoch_history
         };
 
         let audit = self.audit().await;
@@ -363,6 +278,117 @@ impl FedimintConsensus {
                 "Balance sheet of the fed has gone negative, this should never happen! {}",
                 audit
             )
+        }
+
+        epoch_history
+    }
+
+    /// Calls `begin_consensus_epoch` on all modules, dispatching their consensus items
+    async fn process_module_consensus_items(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        module_cis: &[(PeerId, fedimint_api::core::DynModuleConsensusItem)],
+    ) {
+        let per_module_cis: HashMap<
+            ModuleInstanceId,
+            Vec<(PeerId, fedimint_api::core::DynModuleConsensusItem)>,
+        > = module_cis
+            .iter()
+            .cloned()
+            .into_group_map_by(|(_peer, mci)| mci.module_instance_id());
+
+        for (module_key, module_cis) in per_module_cis {
+            self.modules
+                .get_expect(module_key)
+                .begin_consensus_epoch(dbtx, module_cis)
+                .await;
+        }
+    }
+
+    /// Applies all valid fedimint transactions to the database transaction `dbtx` and returns a set
+    /// of invalid transactions that were filtered out
+    async fn process_transactions(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        epoch: u64,
+        transactions: &[(PeerId, Transaction)],
+    ) -> BTreeSet<TransactionId> {
+        // Process transactions
+        let mut rejected_txs: BTreeSet<TransactionId> = BTreeSet::new();
+
+        let caches = self.build_verification_caches(transactions.iter().map(|(_, tx)| tx));
+        let mut processed_txs: HashSet<TransactionId> = HashSet::new();
+
+        for (_, transaction) in transactions.iter().cloned() {
+            let txid: TransactionId = transaction.tx_hash();
+            if !processed_txs.insert(txid) {
+                // Avoid processing duplicate tx from different peers
+                continue;
+            }
+
+            let span = info_span!("Processing transaction");
+            async {
+                trace!(?transaction);
+                dbtx.remove_entry(&ProposedTransactionKey(txid))
+                    .await
+                    .expect("DB Error");
+
+                dbtx.set_tx_savepoint().await;
+                // TODO: use borrowed transaction
+                match self
+                    .process_transaction(dbtx, transaction.clone(), &caches)
+                    .await
+                {
+                    Ok(()) => {
+                        dbtx.insert_entry(
+                            &AcceptedTransactionKey(txid),
+                            &AcceptedTransaction { epoch, transaction },
+                        )
+                        .await
+                        .expect("DB Error");
+                    }
+                    Err(error) => {
+                        rejected_txs.insert(txid);
+                        dbtx.rollback_tx_to_savepoint().await;
+                        warn!(%error, "Transaction failed");
+                        dbtx.insert_entry(&RejectedTransactionKey(txid), &format!("{:?}", error))
+                            .await
+                            .expect("DB Error");
+                    }
+                }
+            }
+            .instrument(span)
+            .await;
+        }
+
+        rejected_txs
+    }
+
+    /// Saves the epoch history, calls `end_consensus_epoch` on all modules and bans misbehaving
+    /// peers
+    async fn finalize_process_epoch(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        outcome: HbbftConsensusOutcome,
+        rejected_txs: BTreeSet<TransactionId>,
+    ) -> SignedEpochOutcome {
+        let epoch_peers: HashSet<PeerId> = outcome.contributions.keys().copied().collect();
+
+        let mut drop_peers = Vec::<PeerId>::new();
+
+        let epoch_history = self
+            .save_epoch_history(outcome.clone(), dbtx, &mut drop_peers, rejected_txs)
+            .await;
+
+        for (_, module) in self.modules.iter_modules() {
+            let module_drop_peers = module.end_consensus_epoch(&epoch_peers, dbtx).await;
+            drop_peers.extend(module_drop_peers);
+        }
+
+        for peer in drop_peers {
+            dbtx.insert_entry(&DropPeerKey(peer), &())
+                .await
+                .expect("DB Error");
         }
 
         epoch_history
@@ -396,13 +422,7 @@ impl FedimintConsensus {
     ) -> SignedEpochOutcome {
         let prev_epoch_key = EpochHistoryKey(outcome.epoch.saturating_sub(1));
         let peers: Vec<PeerId> = outcome.contributions.keys().cloned().collect();
-        let maybe_prev_epoch = self
-            .db
-            .begin_transaction()
-            .await
-            .get_value(&prev_epoch_key)
-            .await
-            .expect("DB error");
+        let maybe_prev_epoch = dbtx.get_value(&prev_epoch_key).await.expect("DB error");
 
         let current = SignedEpochOutcome::new(
             outcome.epoch,
@@ -514,7 +534,7 @@ impl FedimintConsensus {
         for input in transaction.inputs.iter() {
             let meta = self
                 .modules
-                .get(input.module_instance_id())
+                .get_expect(input.module_instance_id())
                 .apply_input(
                     &self.build_interconnect(),
                     dbtx,
@@ -535,7 +555,7 @@ impl FedimintConsensus {
             };
             let amount = self
                 .modules
-                .get(output.module_instance_id())
+                .get_expect(output.module_instance_id())
                 .apply_output(dbtx, &output, out_point)
                 .await
                 .map_err(|e| TransactionSubmissionError::ModuleError(tx_hash, e))?;
@@ -567,7 +587,7 @@ impl FedimintConsensus {
                 };
                 let outcome = self
                     .modules
-                    .get(output.module_instance_id())
+                    .get_expect(output.module_instance_id())
                     .output_status(&mut dbtx, outpoint, output.module_instance_id())
                     .await
                     .expect("the transaction was processed, so should be known");
@@ -608,7 +628,7 @@ impl FedimintConsensus {
         let caches = module_inputs
             .into_iter()
             .map(|(module_key, inputs)| {
-                let module = self.modules.get(module_key);
+                let module = self.modules.get_expect(module_key);
                 (module_key, module.build_verification_cache(&inputs))
             })
             .collect();

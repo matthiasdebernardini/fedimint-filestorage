@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashSet};
 
 use bitcoin_hashes::sha256::Hash as Sha256;
-use bitcoin_hashes::sha256::HashEngine;
 use fedimint_api::core::DynModuleConsensusItem as ModuleConsensusItem;
 use fedimint_api::encoding::{Decodable, DecodeError, Encodable, UnzipConsensus};
 use fedimint_api::module::registry::ModuleDecoderRegistry;
-use fedimint_api::{serde_module_encoding_wrapper, BitcoinHash, PeerId, TransactionId};
+use fedimint_api::module::SerdeModuleEncoding;
+use fedimint_api::{PeerId, TransactionId};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use threshold_crypto::{PublicKey, PublicKeySet, Signature, SignatureShare};
@@ -20,7 +20,7 @@ pub enum ConsensusItem {
     Module(ModuleConsensusItem),
 }
 
-serde_module_encoding_wrapper!(SerdeConsensusItem, ConsensusItem);
+pub type SerdeConsensusItem = SerdeModuleEncoding<ConsensusItem>;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct EpochOutcomeSignatureShare(pub SignatureShare);
@@ -35,7 +35,7 @@ pub struct SignedEpochOutcome {
     pub signature: Option<EpochOutcomeSignature>,
 }
 
-serde_module_encoding_wrapper!(SerdeEpochHistory, SignedEpochOutcome);
+pub type SerdeEpochHistory = SerdeModuleEncoding<SignedEpochOutcome>;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub struct EpochOutcome {
@@ -52,14 +52,6 @@ pub struct EpochOutcome {
 
     /// Transactions from `items` that turned out to be invalid.
     pub rejected_txs: BTreeSet<TransactionId>,
-}
-
-impl EpochOutcome {
-    pub fn hash(&self) -> Sha256 {
-        let mut engine = HashEngine::default();
-        self.consensus_encode(&mut engine).unwrap();
-        Sha256::from_engine(engine)
-    }
 }
 
 impl SignedEpochOutcome {
@@ -81,7 +73,7 @@ impl SignedEpochOutcome {
         };
 
         SignedEpochOutcome {
-            hash: outcome.hash(),
+            hash: outcome.consensus_hash().expect("Hashes"),
             outcome,
             signature: None,
         }
@@ -146,14 +138,15 @@ impl SignedEpochOutcome {
         if self.outcome.epoch > 0 {
             match prev_epoch {
                 None => return Err(EpochVerifyError::MissingPreviousEpoch),
-                Some(prev_epoch) if Some(prev_epoch.outcome.hash()) != self.outcome.last_hash => {
-                    return Err(EpochVerifyError::InvalidPreviousEpochHash)
+                Some(prev_epoch) => {
+                    if prev_epoch.outcome.consensus_hash().ok() != self.outcome.last_hash {
+                        return Err(EpochVerifyError::InvalidPreviousEpochHash);
+                    }
                 }
-                _ => {}
             }
         }
 
-        if self.hash == self.outcome.hash() {
+        if Some(self.hash) == self.outcome.consensus_hash().ok() {
             Ok(())
         } else {
             Err(EpochVerifyError::InvalidEpochHash)
@@ -212,6 +205,7 @@ mod tests {
     use std::collections::{BTreeSet, HashSet};
 
     use bitcoin::hashes::Hash;
+    use fedimint_api::encoding::Encodable;
     use fedimint_api::PeerId;
     use rand::rngs::OsRng;
     use threshold_crypto::{SecretKey, SecretKeySet};
@@ -225,7 +219,7 @@ mod tests {
         sk: &SecretKey,
     ) -> SignedEpochOutcome {
         let missing_sig = history(epoch, prev_epoch, None);
-        let signature = sk.sign(missing_sig.outcome.hash());
+        let signature = sk.sign(missing_sig.outcome.consensus_hash().expect("Hashes"));
         history(epoch, prev_epoch, Some(EpochOutcomeSignature(signature)))
     }
 
@@ -244,7 +238,7 @@ mod tests {
         };
 
         SignedEpochOutcome {
-            hash: outcome.hash(),
+            hash: outcome.consensus_hash().expect("Hashes"),
             outcome,
             signature,
         }

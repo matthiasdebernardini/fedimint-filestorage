@@ -1,6 +1,5 @@
 pub mod db;
 
-use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,17 +14,17 @@ use fedimint_api::tiered::InvalidAmountTierError;
 use fedimint_api::{Amount, OutPoint, ServerModule, Tiered, TieredMulti, TransactionId};
 use fedimint_core::modules::mint::config::MintClientConfig;
 use fedimint_core::modules::mint::{
-    BlindNonce, Mint, MintInput, MintOutput, MintOutputOutcome, Nonce, Note, OutputOutcome,
+    BlindNonce, Mint, MintInput, MintOutput, MintOutputBlindSignatures, MintOutputOutcome, Nonce,
+    Note,
 };
 use fedimint_core::transaction::legacy::{Input, Output, Transaction};
 use secp256k1_zkp::{KeyPair, Secp256k1, Signing};
-use serde::de::Error;
 use serde::{Deserialize, Serialize};
 use tbs::{blind_message, unblind_signature, AggregatePublicKey, BlindedSignature, BlindingKey};
 use thiserror::Error;
 use tracing::{debug, trace, warn};
 
-use crate::api::ApiError;
+use crate::api::{GlobalFederationApi, MemberError, OutputOutcomeError};
 use crate::mint::db::{NextECashNoteIndexKey, NotesPerDenominationKey, PendingCoinsKey};
 use crate::utils::ClientContext;
 use crate::{ChildId, DerivableSecret, MintDecoder};
@@ -144,7 +143,6 @@ pub struct NoteIssuanceRequests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Encodable, Decodable)]
 pub struct SpendableNote {
     pub note: Note,
-    #[serde(deserialize_with = "deserialize_key_pair")]
     pub spend_key: KeyPair,
 }
 
@@ -160,7 +158,7 @@ impl ClientModule for MintClient {
     fn input_amount(&self, input: &<Self::Module as ServerModule>::Input) -> TransactionItemAmount {
         TransactionItemAmount {
             amount: input.total_amount(),
-            fee: self.config.fee_consensus.coin_spend_abs * (input.item_count() as u64),
+            fee: self.config.fee_consensus.note_spend_abs * (input.count_items() as u64),
         }
     }
 
@@ -170,7 +168,7 @@ impl ClientModule for MintClient {
     ) -> TransactionItemAmount {
         TransactionItemAmount {
             amount: output.total_amount(),
-            fee: self.config.fee_consensus.coin_issuance_abs * (output.item_count() as u64),
+            fee: self.config.fee_consensus.note_issuance_abs * (output.count_items() as u64),
         }
     }
 }
@@ -207,7 +205,10 @@ impl MintClient {
 
         let mut change_outputs: Vec<(usize, NoteIssuanceRequests)> = vec![];
         let notes_per_denomination = self.notes_per_denomination(&mut dbtx).await;
-        for amount in change {
+        for amount in change.clone() {
+            if amount == Amount::ZERO {
+                continue;
+            }
             let (issuances, nonces) = self
                 .create_ecash(amount, notes_per_denomination, &mut dbtx)
                 .await;
@@ -283,8 +284,8 @@ impl MintClient {
 
         debug!(
             %amount,
-            coins = %sig_req.0.item_count(),
-            tiers = ?sig_req.0.tiers().collect::<Vec<_>>(),
+            coins = %sig_req.0.count_items(),
+            tiers = ?sig_req.0.iter_tiers().collect::<Vec<_>>(),
             "Generated issuance request"
         );
 
@@ -439,7 +440,7 @@ impl MintClient {
         let bsig = self
             .context
             .api
-            .fetch_output_outcome::<MintOutputOutcome>(outpoint)
+            .fetch_output_outcome::<MintOutputOutcome>(outpoint, &self.context.decoders)
             .await?
             .as_ref()
             .cloned()
@@ -517,12 +518,12 @@ impl Extend<(Amount, NoteIssuanceRequest)> for NoteIssuanceRequests {
 }
 
 impl NoteIssuanceRequests {
-    /// Finalize the issuance request using a [`OutputOutcome`] from the mint containing the blind
+    /// Finalize the issuance request using a [`MintOutputBlindSignatures`] from the mint containing the blind
     /// signatures for all coins in this `IssuanceRequest`. It also takes the mint's
     /// [`AggregatePublicKey`] to validate the supplied blind signatures.
     pub fn finalize(
         &self,
-        bsigs: OutputOutcome,
+        bsigs: MintOutputBlindSignatures,
         mint_pub_key: &Tiered<AggregatePublicKey>,
     ) -> std::result::Result<TieredMulti<SpendableNote>, CoinFinalizationError> {
         if !self.coins.structural_eq(&bsigs.0) {
@@ -548,7 +549,7 @@ impl NoteIssuanceRequests {
     }
 
     pub fn coin_count(&self) -> usize {
-        self.coins.item_count()
+        self.coins.count_items()
     }
 
     pub fn coin_amount(&self) -> Amount {
@@ -602,13 +603,15 @@ pub enum CoinFinalizationError {
 #[derive(Error, Debug)]
 pub enum MintClientError {
     #[error("Error querying federation: {0}")]
-    ApiError(#[from] ApiError),
+    ApiError(#[from] MemberError),
     #[error("Could not finalize issuance request: {0}")]
     FinalizationError(#[from] CoinFinalizationError),
     #[error("Insufficient balance. Amount requested={0} Mint balance={1}")]
     InsufficientBalance(Amount, Amount),
     #[error("The transaction outcome received from the mint did not contain a result for output {0} yet")]
     OutputNotReadyYet(OutPoint),
+    #[error("Output outcome error: {0}")]
+    OutputOutcomeError(#[from] OutputOutcomeError),
     #[error("The transaction outcome returned by the mint contains too few outputs (output {0})")]
     InvalidOutcomeWrongStructure(OutPoint),
     #[error("The transaction outcome returned by the mint has an invalid type (output {0})")]
@@ -634,160 +637,69 @@ impl From<InvalidAmountTierError> for CoinFinalizationError {
     }
 }
 
-// TODO: remove once rust-bitcoin/rust-secp256k1#491 is fixed
-fn deserialize_key_pair<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> std::result::Result<KeyPair, D::Error> {
-    if d.is_human_readable() {
-        let hex_bytes: Cow<'_, str> = Deserialize::deserialize(d)?;
-        let bytes = hex::decode(hex_bytes.as_ref()).map_err(|_| D::Error::custom("Invalid hex"))?;
-        KeyPair::from_seckey_slice(secp256k1_zkp::SECP256K1, &bytes)
-            .map_err(|_| D::Error::custom("Not a valid private key"))
-    } else {
-        let bytes: [u8; 32] = Deserialize::deserialize(d)?;
-        KeyPair::from_seckey_slice(secp256k1_zkp::SECP256K1, &bytes)
-            .map_err(|_| D::Error::custom("Not a valid private key"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::sync::Arc;
 
-    use async_trait::async_trait;
     use bitcoin::hashes::Hash;
-    use bitcoin::Address;
     use fedimint_api::config::ConfigGenParams;
-    use fedimint_api::core::LEGACY_HARDCODED_INSTANCE_ID_MINT;
+    use fedimint_api::core::{
+        DynOutputOutcome, ModuleInstanceId, LEGACY_HARDCODED_INSTANCE_ID_MINT,
+    };
     use fedimint_api::db::mem_impl::MemDatabase;
     use fedimint_api::db::Database;
+    use fedimint_api::module::registry::ModuleDecoderRegistry;
     use fedimint_api::{Amount, OutPoint, Tiered, TransactionId};
-    use fedimint_core::epoch::SignedEpochOutcome;
-    use fedimint_core::modules::ln::contracts::incoming::IncomingContractOffer;
-    use fedimint_core::modules::ln::contracts::ContractId;
-    use fedimint_core::modules::ln::{ContractAccount, LightningGateway};
     use fedimint_core::modules::mint::config::MintClientConfig;
-    use fedimint_core::modules::mint::db::ECashUserBackupSnapshot;
     use fedimint_core::modules::mint::{Mint, MintGen, MintGenParams, MintOutput};
-    use fedimint_core::modules::wallet::PegOutFees;
     use fedimint_core::outcome::{SerdeOutputOutcome, TransactionStatus};
     use fedimint_core::transaction::legacy::Input;
+    use fedimint_mint::common::MintDecoder;
     use fedimint_testing::FakeFed;
     use futures::executor::block_on;
-    use threshold_crypto::PublicKey;
+    use tokio::sync::Mutex;
 
-    use crate::api::{IFederationApi, WsFederationApi};
+    use crate::api::fake::FederationApiFaker;
+    use crate::api::WsFederationApi;
     use crate::mint::db::NextECashNoteIndexKey;
     use crate::mint::MintClient;
     use crate::{
-        module_decode_stubs, BlindNonce, ClientContext, DerivableSecret, LegacyTransaction,
-        TransactionBuilder, MINT_SECRET_CHILD_ID,
+        module_decode_stubs, BlindNonce, ClientContext, DerivableSecret, TransactionBuilder,
+        MINT_SECRET_CHILD_ID,
     };
 
     type Fed = FakeFed<Mint>;
 
-    #[derive(Debug)]
-    struct FakeApi {
-        mint: Arc<tokio::sync::Mutex<Fed>>,
-    }
-
-    #[async_trait]
-    impl IFederationApi for FakeApi {
-        async fn fetch_tx_outcome(
-            &self,
-            tx: TransactionId,
-        ) -> crate::api::Result<TransactionStatus> {
-            let mint = self.mint.lock().await;
-            Ok(TransactionStatus::Accepted {
-                epoch: 0,
-                outputs: vec![SerdeOutputOutcome::from(
-                    &(fedimint_api::core::DynOutputOutcome::from_typed(
-                        LEGACY_HARDCODED_INSTANCE_ID_MINT,
+    async fn make_test_mint_fed(
+        module_id: ModuleInstanceId,
+        fed: Arc<Mutex<FakeFed<Mint>>>,
+    ) -> FederationApiFaker<tokio::sync::Mutex<FakeFed<Mint>>> {
+        let members = fed
+            .lock()
+            .await
+            .members
+            .iter()
+            .map(|(peer_id, _, _)| *peer_id)
+            .collect();
+        FederationApiFaker::new(fed, members).with(
+            "/fetch_transaction",
+            move |mint: Arc<Mutex<FakeFed<Mint>>>, tx: TransactionId| async move {
+                let mint = mint.lock().await;
+                Ok(TransactionStatus::Accepted {
+                    epoch: 0,
+                    outputs: vec![SerdeOutputOutcome::from(&DynOutputOutcome::from_typed(
+                        module_id,
                         mint.output_outcome(OutPoint {
                             txid: tx,
                             out_idx: 0,
                         })
                         .await
                         .unwrap(),
-                    )),
-                )],
-            })
-        }
-
-        async fn submit_transaction(
-            &self,
-            _tx: LegacyTransaction,
-        ) -> crate::api::Result<TransactionId> {
-            unimplemented!()
-        }
-
-        async fn fetch_contract(
-            &self,
-            _contract: ContractId,
-        ) -> crate::api::Result<ContractAccount> {
-            unimplemented!()
-        }
-
-        async fn fetch_consensus_block_height(&self) -> crate::api::Result<u64> {
-            unimplemented!()
-        }
-
-        async fn fetch_offer(
-            &self,
-            _payment_hash: bitcoin::hashes::sha256::Hash,
-        ) -> crate::api::Result<IncomingContractOffer> {
-            unimplemented!();
-        }
-
-        async fn fetch_peg_out_fees(
-            &self,
-            _address: &Address,
-            _amount: &bitcoin::Amount,
-        ) -> crate::api::Result<Option<PegOutFees>> {
-            unimplemented!();
-        }
-
-        async fn fetch_gateways(&self) -> crate::api::Result<Vec<LightningGateway>> {
-            unimplemented!()
-        }
-
-        async fn register_gateway(&self, _gateway: LightningGateway) -> crate::api::Result<()> {
-            unimplemented!()
-        }
-
-        async fn fetch_epoch_history(
-            &self,
-            _epoch: u64,
-            _pk: PublicKey,
-        ) -> crate::api::Result<SignedEpochOutcome> {
-            unimplemented!()
-        }
-
-        async fn fetch_last_epoch(&self) -> crate::api::Result<u64> {
-            unimplemented!()
-        }
-
-        async fn offer_exists(
-            &self,
-            _payment_hash: bitcoin::hashes::sha256::Hash,
-        ) -> crate::api::Result<bool> {
-            unimplemented!()
-        }
-
-        async fn upload_ecash_backup(
-            &self,
-            _request: &fedimint_mint::SignedBackupRequest,
-        ) -> crate::api::Result<()> {
-            unimplemented!()
-        }
-
-        async fn download_ecash_backup(
-            &self,
-            _id: &secp256k1::XOnlyPublicKey,
-        ) -> crate::api::Result<Vec<ECashUserBackupSnapshot>> {
-            unimplemented!()
-        }
+                    ))],
+                })
+            },
+        )
     }
 
     async fn new_mint_and_client() -> (
@@ -795,6 +707,7 @@ mod tests {
         MintClientConfig,
         ClientContext,
     ) {
+        let module_id = LEGACY_HARDCODED_INSTANCE_ID_MINT;
         let fed = Arc::new(tokio::sync::Mutex::new(
             FakeFed::<Mint>::new(
                 4,
@@ -807,17 +720,18 @@ mod tests {
                     ],
                 }),
                 &MintGen,
-                LEGACY_HARDCODED_INSTANCE_ID_MINT,
+                module_id,
             )
             .await
             .unwrap(),
         ));
 
-        let api = FakeApi { mint: fed.clone() };
+        let api = make_test_mint_fed(module_id, fed.clone()).await;
 
         let client_config = fed.lock().await.client_cfg().clone();
 
         let client_context = ClientContext {
+            decoders: ModuleDecoderRegistry::from_iter([(module_id, MintDecoder.into())]),
             db: Database::new(MemDatabase::new(), module_decode_stubs()),
             api: api.into(),
             secp: secp256k1_zkp::Secp256k1::new(),
@@ -961,6 +875,8 @@ mod tests {
 
         let db = fedimint_rocksdb::RocksDb::open(tempfile::tempdir().unwrap()).unwrap();
 
+        let module_id = LEGACY_HARDCODED_INSTANCE_ID_MINT;
+
         let client: MintClient = MintClient {
             epoch_pk: threshold_crypto::SecretKey::random().public_key(),
             config: MintClientConfig {
@@ -970,6 +886,7 @@ mod tests {
                 max_notes_per_denomination: 0,
             },
             context: Arc::new(ClientContext {
+                decoders: ModuleDecoderRegistry::from_iter([(module_id, MintDecoder.into())]),
                 db: Database::new(db, module_decode_stubs()),
                 api: WsFederationApi::new(vec![]).into(),
                 secp: Default::default(),

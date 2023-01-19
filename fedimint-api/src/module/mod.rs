@@ -5,21 +5,24 @@ pub mod registry;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use secp256k1_zkp::XOnlyPublicKey;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::instrument;
 
 use crate::cancellable::Cancellable;
-use crate::config::{ClientModuleConfig, ConfigGenParams, DkgPeerMsg, ServerModuleConfig};
+use crate::config::{ConfigGenParams, DkgPeerMsg, ServerModuleConfig};
 use crate::core::{
     Decoder, DynDecoder, Input, ModuleConsensusItem, ModuleInstanceId, ModuleKind, Output,
     OutputOutcome,
 };
 use crate::db::{Database, DatabaseTransaction};
+use crate::encoding::{Decodable, DecodeError, Encodable};
 use crate::module::audit::Audit;
 use crate::module::interconnect::ModuleInterconect;
 use crate::net::peers::MuxPeerConnections;
@@ -128,25 +131,14 @@ macro_rules! __api_endpoint {
             }
         }
 
-        ApiEndpoint {
-            path: <Endpoint as $crate::module::TypedApiEndpoint>::PATH,
-            handler: Box::new(|m, dbtx, param| {
-                Box::pin(async move {
-                    let params = $crate::module::__reexports::serde_json::from_value(param)
-                        .map_err(|e| $crate::module::ApiError::bad_request(e.to_string()))?;
-
-                    let ret =
-                        <Endpoint as $crate::module::TypedApiEndpoint>::handle(m, dbtx, params)
-                            .await?;
-                    Ok($crate::module::__reexports::serde_json::to_value(ret)
-                        .expect("encoding error"))
-                })
-            }),
-        }
+        $crate::module::ApiEndpoint::from_typed::<Endpoint>()
     }};
 }
 
 pub use __api_endpoint as api_endpoint;
+use fedimint_api::config::ModuleConfigResponse;
+
+use self::registry::ModuleDecoderRegistry;
 
 type HandlerFnReturn<'a> = BoxFuture<'a, Result<serde_json::Value, ApiError>>;
 type HandlerFn<M> = Box<
@@ -169,6 +161,53 @@ pub struct ApiEndpoint<M> {
     ///   * Reference to the module which defined it
     ///   * Request parameters parsed into JSON `[Value](serde_json::Value)`
     pub handler: HandlerFn<M>,
+}
+
+// <()> is used to avoid specify state.
+impl ApiEndpoint<()> {
+    pub fn from_typed<E: TypedApiEndpoint>() -> ApiEndpoint<E::State>
+    where
+        E::Param: Debug,
+        E::Response: Debug,
+    {
+        #[instrument(
+            target = "fedimint_server::request",
+            level = "trace",
+            skip_all,
+            fields(method = E::PATH),
+            ret,
+        )]
+        async fn handle_request<'a, 'b, E>(
+            state: &'a E::State,
+            dbtx: fedimint_api::db::DatabaseTransaction<'b>,
+            param: E::Param,
+        ) -> Result<E::Response, ApiError>
+        where
+            E: TypedApiEndpoint,
+            E::Param: Debug,
+            E::Response: Debug,
+        {
+            tracing::trace!(target: "fedimint_server::request", ?param, "recieved request");
+            let result = E::handle(state, dbtx, param).await;
+            if let Err(error) = &result {
+                tracing::trace!(target: "fedimint_server::request", ?error, "error");
+            }
+            result
+        }
+
+        ApiEndpoint {
+            path: E::PATH,
+            handler: Box::new(|m, dbtx, param| {
+                Box::pin(async move {
+                    let params = serde_json::from_value(param)
+                        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    let ret = handle_request::<E>(m, dbtx, params).await?;
+                    Ok(serde_json::to_value(ret).expect("encoding error"))
+                })
+            }),
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -239,13 +278,8 @@ pub trait IModuleGen: Debug {
         task_group: &mut TaskGroup,
     ) -> anyhow::Result<Cancellable<ServerModuleConfig>>;
 
-    fn to_client_config(&self, config: ServerModuleConfig) -> anyhow::Result<ClientModuleConfig>;
-
-    // TODO: There's a bit of confusion here between whole config as one value, `ServerModuleConfig`, and just consensus part
-    fn to_client_config_from_consensus_value(
-        &self,
-        config: serde_json::Value,
-    ) -> anyhow::Result<ClientModuleConfig>;
+    fn to_config_response(&self, config: serde_json::Value)
+        -> anyhow::Result<ModuleConfigResponse>;
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()>;
 }
@@ -294,12 +328,8 @@ pub trait ModuleGen: Debug + Sized {
         task_group: &mut TaskGroup,
     ) -> anyhow::Result<Cancellable<ServerModuleConfig>>;
 
-    fn to_client_config(&self, config: ServerModuleConfig) -> anyhow::Result<ClientModuleConfig>;
-
-    fn to_client_config_from_consensus_value(
-        &self,
-        config: serde_json::Value,
-    ) -> anyhow::Result<ClientModuleConfig>;
+    fn to_config_response(&self, config: serde_json::Value)
+        -> anyhow::Result<ModuleConfigResponse>;
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()>;
 }
@@ -356,15 +386,11 @@ where
         .await
     }
 
-    fn to_client_config(&self, config: ServerModuleConfig) -> anyhow::Result<ClientModuleConfig> {
-        <Self as ModuleGen>::to_client_config(self, config)
-    }
-
-    fn to_client_config_from_consensus_value(
+    fn to_config_response(
         &self,
-        config: Value,
-    ) -> anyhow::Result<ClientModuleConfig> {
-        <Self as ModuleGen>::to_client_config_from_consensus_value(self, config)
+        config: serde_json::Value,
+    ) -> anyhow::Result<ModuleConfigResponse> {
+        <Self as ModuleGen>::to_config_response(self, config)
     }
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()> {
@@ -502,4 +528,26 @@ pub trait ServerModule: Debug + Sized {
     /// to users as well as to other modules. They thus should be deterministic, only dependant on
     /// their input and the current epoch.
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>>;
+}
+
+/// Creates a struct that can be used to make our module-decodable structs interact with
+/// `serde`-based APIs (HBBFT, jsonrpsee). It creates a wrapper that holds the data as serialized
+// bytes internally.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct SerdeModuleEncoding<T: Encodable + Decodable>(Vec<u8>, #[serde(skip)] PhantomData<T>);
+
+impl<T: Encodable + Decodable> From<&T> for SerdeModuleEncoding<T> {
+    fn from(value: &T) -> Self {
+        let mut bytes = vec![];
+        fedimint_api::encoding::Encodable::consensus_encode(value, &mut bytes)
+            .expect("Writing to buffer can never fail");
+        Self(bytes, PhantomData)
+    }
+}
+
+impl<T: Encodable + Decodable> SerdeModuleEncoding<T> {
+    pub fn try_into_inner(&self, modules: &ModuleDecoderRegistry) -> Result<T, DecodeError> {
+        let mut reader = std::io::Cursor::new(&self.0);
+        Decodable::consensus_decode(&mut reader, modules)
+    }
 }

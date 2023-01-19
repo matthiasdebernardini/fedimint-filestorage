@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
-use std::fmt;
+use std::fmt::{self, format};
 
 use async_trait::async_trait;
 use common::DummyDecoder;
 use db::{ExampleKey, ExampleKeyPrefix};
 use fedimint_api::cancellable::Cancellable;
+use fedimint_api::config::TypedServerModuleConsensusConfig;
 use fedimint_api::config::{
-    ConfigGenParams, DkgPeerMsg, ModuleGenParams, ServerModuleConfig, TypedServerModuleConfig,
+    ClientModuleConfig, ConfigGenParams, DkgPeerMsg, ModuleGenParams, ServerModuleConfig,
+    TypedServerModuleConfig,
 };
-use fedimint_api::config::{ModuleConfigResponse, TypedServerModuleConsensusConfig};
 use fedimint_api::core::{ModuleInstanceId, ModuleKind};
 use fedimint_api::db::{Database, DatabaseTransaction};
 use fedimint_api::encoding::{Decodable, Encodable};
@@ -40,9 +41,15 @@ const KIND: ModuleKind = ModuleKind::from_static_str("dummy");
 pub struct Dummy {
     pub cfg: DummyConfig,
 }
+#[autoimpl(Deref, DerefMut using self.0)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct DummyOutputConfirmation(pub SmolFSEntry);
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub struct DummyOutputConfirmation(pub String);
+pub struct SmolFSEntry {
+    pubkey: String,
+    backup: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct DummyVerificationCache;
@@ -82,8 +89,8 @@ impl ModuleGen for DummyConfigGenerator {
             .map(|&peer| {
                 let config = DummyConfig {
                     local: DummyConfigLocal {
-                        max_size: 3,
-                        new_user_backup: String::new(),
+                        pubkey: String::new(),
+                        backup: String::new(),
                     },
                     consensus: DummyConfigConsensus {
                         merkle_root: vec![],
@@ -114,28 +121,29 @@ impl ModuleGen for DummyConfigGenerator {
 
         let server = DummyConfig {
             local: DummyConfigLocal {
-                max_size: 3,
-                new_user_backup: String::new(),
+                pubkey: String::new(),
+                backup: String::new(),
             },
             consensus: DummyConfigConsensus {
                 merkle_root: vec![],
             },
         };
-        // copy wallet module to give pubkeys to all fed members
 
         Ok(Ok(server.to_erased()))
     }
 
-    fn to_config_response(
+    fn to_client_config(&self, config: ServerModuleConfig) -> anyhow::Result<ClientModuleConfig> {
+        Ok(config
+            .to_typed::<DummyConfig>()?
+            .consensus
+            .to_client_config())
+    }
+
+    fn to_client_config_from_consensus_value(
         &self,
         config: serde_json::Value,
-    ) -> anyhow::Result<ModuleConfigResponse> {
-        let config = serde_json::from_value::<DummyConfigConsensus>(config)?;
-
-        Ok(ModuleConfigResponse {
-            client: config.to_client_config(),
-            consensus_hash: config.consensus_hash()?,
-        })
+    ) -> anyhow::Result<ClientModuleConfig> {
+        Ok(serde_json::from_value::<DummyConfigConsensus>(config)?.to_client_config())
     }
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()> {
@@ -211,19 +219,33 @@ impl ServerModule for Dummy {
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
     ) -> Vec<Self::ConsensusItem> {
-        let new_user_backup = self.cfg.local.new_user_backup.clone();
         dbtx.find_by_prefix(&ExampleKeyPrefix)
             .await
-            .map(|res| DummyOutputConfirmation(new_user_backup.clone()))
+            .map(|res| {
+                let res = res.expect("DB Error");
+                DummyOutputConfirmation(SmolFSEntry {
+                    pubkey: format!("{:?}", res.0),
+                    backup: res.1,
+                })
+            })
             // .chain(std::iter::once(round_ci))
             .collect()
     }
 
     async fn begin_consensus_epoch<'a, 'b>(
         &'a self,
-        _dbtx: &mut DatabaseTransaction<'b>,
+        dbtx: &mut DatabaseTransaction<'b>,
         _consensus_items: Vec<(PeerId, Self::ConsensusItem)>,
     ) {
+        let pubkey = self.cfg.local.pubkey.clone();
+        let backup = self.cfg.local.backup.clone();
+        let a = dbtx
+            .insert_entry(&ExampleKey(pubkey), &backup)
+            .await
+            .expect("DB Error")
+            .unwrap();
+        println!("{self:?}");
+        println!("{:?}", a);
     }
 
     fn build_verification_cache<'a>(
@@ -240,7 +262,8 @@ impl ServerModule for Dummy {
         _verification_cache: &Self::VerificationCache,
         _input: &'a Self::Input,
     ) -> Result<InputMeta, ModuleError> {
-        unimplemented!()
+        todo!("check that its a valid pubkey");
+        todo!("check that backup isn't too large");
     }
 
     async fn apply_input<'a, 'b, 'c>(

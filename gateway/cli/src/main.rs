@@ -87,29 +87,27 @@ async fn main() {
     //         // Create config file
     //         out_dir.push("gateway.config");
 
-    //         let cfg_file =
-    //             std::fs::File::create(out_dir).expect("Failed to create gateway config file");
-    //         serde_json::to_writer_pretty(
-    //             cfg_file,
-    //             &GatewayConfig {
-    //                 bind_address: address,
-    //                 announce_address,
-    //                 // TODO: Generate a strong random password
-    //                 password: source_password(cli.rpcpassword),
-    //                 // TODO: Remove this field with hardcoded value once we have fixed Issue 664:
-    //                 default_federation: FederationId::dummy(),
-    //             },
-    //         )
-    //         .expect("Failed to write gateway configs to file");
-    //     }
-    //     Commands::VersionHash => {
-    //         println!("version: {}", env!("GIT_HASH"));
-    //     }
-    //     Commands::Info => {
-    //         let response = client
-    //             .get_info(source_password(cli.rpcpassword))
-    //             .await
-    //             .expect("Failed to get info");
+    //     let cfg_file =
+    //         std::fs::File::create(out_dir).expect("Failed to create gateway config file");
+    //     serde_json::to_writer_pretty(
+    //         cfg_file,
+    //         &GatewayConfig {
+    //             bind_address: address,
+    //             announce_address,
+    //             // TODO: Generate a strong random password
+    //             password: source_password(cli.rpcpassword),
+    //         },
+    //     )
+    //     .expect("Failed to write gateway configs to file");
+    // }
+    // Commands::VersionHash => {
+    //     println!("version: {}", env!("GIT_HASH"));
+    // }
+    // Commands::Info => {
+    //     let response = client
+    //         .get_info(source_password(cli.rpcpassword))
+    //         .await
+    //         .expect("Failed to get info");
 
     //         print_response(response).await;
     //     }

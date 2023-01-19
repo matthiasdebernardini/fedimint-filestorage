@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use fedimint_api::config::ConfigResponse;
 use fedimint_api::core::ModuleInstanceId;
 use fedimint_api::server::DynServerModule;
 use fedimint_api::{
-    config::ClientConfig,
     module::{api_endpoint, ApiEndpoint, ApiError},
     task::TaskHandle,
     TransactionId,
@@ -155,7 +155,7 @@ fn attach_endpoints_erased(
                 // are only reading and the few that do write anything are atomic. Lastly, this
                 // is only the last line of defense
                 AssertUnwindSafe((handler)(
-                    fedimint.modules.get(module_instance),
+                    fedimint.modules.get_expect(module_instance),
                     dbtx,
                     params,
                 ))
@@ -183,11 +183,7 @@ fn server_endpoints() -> Vec<ApiEndpoint<FedimintConsensus>> {
     vec![
         api_endpoint! {
             "/transaction",
-            async |fedimint: &FedimintConsensus, _dbtx, transaction: serde_json::Value| -> TransactionId {
-                // deserializing Transaction from json Value always fails
-                // we need to convert it to string first
-                let string = serde_json::to_string(&transaction).map_err(|e| ApiError::bad_request(e.to_string()))?;
-                let serde_transaction: SerdeTransaction = serde_json::from_str(&string).map_err(|e| ApiError::bad_request(e.to_string()))?;
+            async |fedimint: &FedimintConsensus, _dbtx, serde_transaction: SerdeTransaction| -> TransactionId {
                 let transaction = serde_transaction.try_into_inner(&fedimint.modules.decoder_registry()).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
                 let tx_id = transaction.tx_hash();
@@ -225,8 +221,8 @@ fn server_endpoints() -> Vec<ApiEndpoint<FedimintConsensus>> {
         },
         api_endpoint! {
             "/config",
-            async |fedimint: &FedimintConsensus, _dbtx, _v: ()| -> ClientConfig {
-                Ok(fedimint.cfg.consensus.to_client_config(&fedimint.module_inits))
+            async |fedimint: &FedimintConsensus, _dbtx, _v: ()| -> ConfigResponse {
+                Ok(fedimint.cfg.consensus.to_config_response(&fedimint.module_inits))
             }
         },
     ]

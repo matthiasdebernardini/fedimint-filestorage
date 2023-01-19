@@ -9,11 +9,11 @@ pub use common::{BackupRequest, SignedBackupRequest};
 use config::FeeConsensus;
 use db::{ECashUserBackupSnapshot, EcashBackupKey};
 use fedimint_api::cancellable::{Cancellable, Cancelled};
-use fedimint_api::config::TypedServerModuleConsensusConfig;
 use fedimint_api::config::{
-    scalar, ClientModuleConfig, ConfigGenParams, DkgPeerMsg, DkgRunner, ModuleGenParams,
-    ServerModuleConfig, TypedServerModuleConfig,
+    scalar, ConfigGenParams, DkgPeerMsg, DkgRunner, ModuleGenParams, ServerModuleConfig,
+    TypedServerModuleConfig,
 };
+use fedimint_api::config::{ModuleConfigResponse, TypedServerModuleConsensusConfig};
 use fedimint_api::core::{ModuleInstanceId, ModuleKind};
 use fedimint_api::db::{Database, DatabaseTransaction};
 use fedimint_api::encoding::{Decodable, Encodable};
@@ -77,25 +77,25 @@ pub struct Mint {
 
 /// A consenus item from one of the federation members contributing partials signatures to blind nonces submitted in it
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub struct MintOutputConfirmation {
+pub struct MintConsensusItem {
     /// Reference to a Federation Transaction containing an [`MintOutput`] with `BlindNonce`s the signatures` are for
     pub out_point: OutPoint,
     /// (Partial) signatures
-    pub signatures: OutputConfirmationSignatures,
+    pub signatures: MintOutputSignatureShare,
 }
 
 // FIXME: optimize out blinded msg by making the mint remember it
 /// Blind signature share from one Federation peer for a single [`MintOutput`]
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub struct OutputConfirmationSignatures(
+pub struct MintOutputSignatureShare(
     pub TieredMulti<(tbs::BlindedMessage, tbs::BlindedSignatureShare)>,
 );
 
-/// Result of Federation members confirming [`MintOutput`] by contributing partial signatures via [`MintOutputConfirmation`]
+/// Result of Federation members confirming [`MintOutput`] by contributing partial signatures via [`MintConsensusItem`]
 ///
 /// A set of full blinded singatures.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub struct OutputOutcome(pub TieredMulti<tbs::BlindedSignature>);
+pub struct MintOutputBlindSignatures(pub TieredMulti<tbs::BlindedSignature>);
 
 /// An verifiable one time use IOU from the mint.
 ///
@@ -179,7 +179,6 @@ impl ModuleGen for MintGen {
             .map(|&peer| {
                 let config = MintConfig {
                     consensus: MintConfigConsensus {
-                        threshold: peers.threshold(),
                         peer_tbs_pks: peers
                             .iter()
                             .map(|&key_peer| {
@@ -268,7 +267,6 @@ impl ModuleGen for MintGen {
                     })
                     .collect(),
                 fee_consensus: Default::default(),
-                threshold: peers.threshold(),
                 max_notes_per_denomination: DEFAULT_MAX_NOTES_PER_DENOMINATION,
             },
         };
@@ -276,18 +274,16 @@ impl ModuleGen for MintGen {
         Ok(Ok(server.to_erased()))
     }
 
-    fn to_client_config(&self, config: ServerModuleConfig) -> anyhow::Result<ClientModuleConfig> {
-        Ok(config
-            .to_typed::<MintConfig>()?
-            .consensus
-            .to_client_config())
-    }
-
-    fn to_client_config_from_consensus_value(
+    fn to_config_response(
         &self,
         config: serde_json::Value,
-    ) -> anyhow::Result<ClientModuleConfig> {
-        Ok(serde_json::from_value::<MintConfigConsensus>(config)?.to_client_config())
+    ) -> anyhow::Result<ModuleConfigResponse> {
+        let config = serde_json::from_value::<MintConfigConsensus>(config)?;
+
+        Ok(ModuleConfigResponse {
+            client: config.to_client_config(),
+            consensus_hash: config.consensus_hash()?,
+        })
     }
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()> {
@@ -330,7 +326,7 @@ impl std::fmt::Display for MintOutput {
 
 #[autoimpl(Deref, DerefMut using self.0)]
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub struct MintOutputOutcome(pub Option<OutputOutcome>);
+pub struct MintOutputOutcome(pub Option<MintOutputBlindSignatures>);
 
 impl std::fmt::Display for MintOutputOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -345,7 +341,7 @@ impl std::fmt::Display for MintOutputOutcome {
     }
 }
 
-impl std::fmt::Display for MintOutputConfirmation {
+impl std::fmt::Display for MintConsensusItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -363,7 +359,7 @@ impl ServerModule for Mint {
     type Input = MintInput;
     type Output = MintOutput;
     type OutputOutcome = MintOutputOutcome;
-    type ConsensusItem = MintOutputConfirmation;
+    type ConsensusItem = MintConsensusItem;
     type VerificationCache = VerifiedNotes;
 
     fn decoder(&self) -> Self::Decoder {
@@ -384,7 +380,7 @@ impl ServerModule for Mint {
             .await
             .map(|res| {
                 let (key, signatures) = res.expect("DB error");
-                MintOutputConfirmation {
+                MintConsensusItem {
                     out_point: key.out_point,
                     signatures,
                 }
@@ -412,16 +408,16 @@ impl ServerModule for Mint {
         &'a self,
         inputs: impl Iterator<Item = &'a Self::Input> + Send,
     ) -> Self::VerificationCache {
-        // We build a lookup table for checking the validity of all coins for certain amounts. This
+        // We build a lookup table for checking the validity of all notes for certain amounts. This
         // calculation can happen massively in parallel since verification is a pure function and
         // thus has no side effects.
         let valid_notes = inputs
             .flat_map(|inputs| inputs.0.iter_items())
             .par_bridge()
-            .filter_map(|(amount, coin)| {
+            .filter_map(|(amount, note)| {
                 let amount_key = self.pub_key.get(&amount)?;
-                if coin.verify(*amount_key) {
-                    Some((*coin, amount))
+                if note.verify(*amount_key) {
+                    Some((*note, amount))
                 } else {
                     None
                 }
@@ -438,19 +434,19 @@ impl ServerModule for Mint {
         verification_cache: &Self::VerificationCache,
         input: &'a Self::Input,
     ) -> Result<InputMeta, ModuleError> {
-        for (amount, coin) in input.iter_items() {
-            let coin_valid = verification_cache
+        for (amount, note) in input.iter_items() {
+            let note_valid = verification_cache
                 .valid_notes
-                .get(coin) // We validated the coin
-                .map(|coint_amount| *coint_amount == amount) // It has the right amount tier
-                .unwrap_or(false); // If we didn't validate the coin return false
+                .get(note) // We validated the note
+                .map(|notet_amount| *notet_amount == amount) // It has the right amount tier
+                .unwrap_or(false); // If we didn't validate the note return false
 
-            if !coin_valid {
+            if !note_valid {
                 return Err(MintError::InvalidSignature).into_module_error_other();
             }
 
             if dbtx
-                .get_value(&NonceKey(coin.0))
+                .get_value(&NonceKey(note.0))
                 .await
                 .expect("DB error")
                 .is_some()
@@ -462,11 +458,11 @@ impl ServerModule for Mint {
         Ok(InputMeta {
             amount: TransactionItemAmount {
                 amount: input.total_amount(),
-                fee: self.cfg.consensus.fee_consensus.coin_spend_abs * (input.item_count() as u64),
+                fee: self.cfg.consensus.fee_consensus.note_spend_abs * (input.count_items() as u64),
             },
             puk_keys: input
                 .iter_items()
-                .map(|(_, coin)| *coin.spend_key())
+                .map(|(_, note)| *note.spend_key())
                 .collect(),
         })
     }
@@ -482,8 +478,8 @@ impl ServerModule for Mint {
             .validate_input(interconnect, dbtx, cache, input)
             .await?;
 
-        for (amount, coin) in input.iter_items() {
-            let key = NonceKey(coin.0);
+        for (amount, note) in input.iter_items() {
+            let key = NonceKey(note.0);
             dbtx.insert_new_entry(&key, &()).await.expect("DB Error");
             dbtx.insert_new_entry(&MintAuditItemKey::Redemption(key), &amount)
                 .await
@@ -498,10 +494,10 @@ impl ServerModule for Mint {
         _dbtx: &mut DatabaseTransaction,
         output: &Self::Output,
     ) -> Result<TransactionItemAmount, ModuleError> {
-        if output.max_tier_len() > self.cfg.consensus.max_notes_per_denomination.into() {
+        if output.longest_tier_len() > self.cfg.consensus.max_notes_per_denomination.into() {
             return Err(MintError::ExceededMaxNotes(
                 self.cfg.consensus.max_notes_per_denomination,
-                output.max_tier_len(),
+                output.longest_tier_len(),
             ))
             .into_module_error_other();
         }
@@ -517,8 +513,8 @@ impl ServerModule for Mint {
         } else {
             Ok(TransactionItemAmount {
                 amount: output.total_amount(),
-                fee: self.cfg.consensus.fee_consensus.coin_issuance_abs
-                    * (output.item_count() as u64),
+                fee: self.cfg.consensus.fee_consensus.note_issuance_abs
+                    * (output.count_items() as u64),
             })
         }
     }
@@ -559,8 +555,8 @@ impl ServerModule for Mint {
             out_point: OutPoint,
             // TODO: remove Option, make it mandatory
             // TODO: make it only the message, remove msg from PartialSigResponse
-            our_contribution: Option<OutputConfirmationSignatures>,
-            signature_shares: Vec<(PeerId, OutputConfirmationSignatures)>,
+            our_contribution: Option<MintOutputSignatureShare>,
+            signature_shares: Vec<(PeerId, MintOutputSignatureShare)>,
         }
 
         let mut drop_peers = BTreeSet::new();
@@ -830,7 +826,7 @@ impl Mint {
         .map(|(amt, keys)| {
             // TODO: avoid this through better aggregation API allowing references or
             let keys = keys.into_iter().copied().collect::<Vec<_>>();
-            (amt, keys.aggregate(cfg.consensus.threshold))
+            (amt, keys.aggregate(cfg.consensus.peer_tbs_pks.threshold()))
         })
         .collect();
 
@@ -849,8 +845,8 @@ impl Mint {
     fn blind_sign(
         &self,
         output: TieredMulti<BlindNonce>,
-    ) -> Result<OutputConfirmationSignatures, MintError> {
-        Ok(OutputConfirmationSignatures(output.map(
+    ) -> Result<MintOutputSignatureShare, MintError> {
+        Ok(MintOutputSignatureShare(output.map(
             |amt, msg| -> Result<_, InvalidAmountTierError> {
                 let sec_key = self.sec_key.tier(&amt)?;
                 let blind_signature = sign_blinded_msg(msg.0, *sec_key);
@@ -861,15 +857,18 @@ impl Mint {
 
     fn combine(
         &self,
-        our_contribution: Option<OutputConfirmationSignatures>,
-        partial_sigs: Vec<(PeerId, OutputConfirmationSignatures)>,
-    ) -> (Result<OutputOutcome, CombineError>, MintShareErrors) {
+        our_contribution: Option<MintOutputSignatureShare>,
+        partial_sigs: Vec<(PeerId, MintOutputSignatureShare)>,
+    ) -> (
+        Result<MintOutputBlindSignatures, CombineError>,
+        MintShareErrors,
+    ) {
         // Terminate early if there are not enough shares
-        if partial_sigs.len() < self.cfg.consensus.threshold {
+        if partial_sigs.len() < self.cfg.consensus.peer_tbs_pks.threshold() {
             return (
                 Err(CombineError::TooFewShares(
                     partial_sigs.iter().map(|(peer, _)| peer).cloned().collect(),
-                    self.cfg.consensus.threshold,
+                    self.cfg.consensus.peer_tbs_pks.threshold(),
                 )),
                 MintShareErrors(vec![]),
             );
@@ -962,11 +961,11 @@ impl Mint {
                 .collect::<Vec<_>>();
 
             // Check that there are still sufficient
-            if valid_sigs.len() < self.cfg.consensus.threshold {
+            if valid_sigs.len() < self.cfg.consensus.peer_tbs_pks.threshold() {
                 return Err(CombineError::TooFewValidShares(
                     valid_sigs.len(),
                     partial_sigs.len(),
-                    self.cfg.consensus.threshold,
+                    self.cfg.consensus.peer_tbs_pks.threshold(),
                 ));
             }
 
@@ -974,7 +973,7 @@ impl Mint {
                 valid_sigs
                     .into_iter()
                     .map(|(peer, share)| (peer.to_usize(), share)),
-                self.cfg.consensus.threshold,
+                self.cfg.consensus.peer_tbs_pks.threshold(),
             );
 
             Ok((amt, sig))
@@ -986,7 +985,10 @@ impl Mint {
             Err(e) => return (Err(e), MintShareErrors(peer_errors)),
         };
 
-        (Ok(OutputOutcome(bsigs)), MintShareErrors(peer_errors))
+        (
+            Ok(MintOutputBlindSignatures(bsigs)),
+            MintShareErrors(peer_errors),
+        )
     }
 
     async fn process_partial_signature<'a>(
@@ -994,7 +996,7 @@ impl Mint {
         dbtx: &mut DatabaseTransaction<'a>,
         peer: PeerId,
         output_id: OutPoint,
-        partial_sig: OutputConfirmationSignatures,
+        partial_sig: MintOutputSignatureShare,
     ) {
         if dbtx
             .get_value(&OutputOutcomeKey(output_id))
@@ -1027,7 +1029,7 @@ impl Mint {
 }
 
 impl Note {
-    /// Verify the coin's validity under a mit key `pk`
+    /// Verify the note's validity under a mit key `pk`
     pub fn verify(&self, pk: tbs::AggregatePublicKey) -> bool {
         tbs::verify(self.0.to_message(), self.1, pk)
     }
@@ -1072,7 +1074,7 @@ plugin_types_trait_impl!(
     MintInput,
     MintOutput,
     MintOutputOutcome,
-    MintOutputConfirmation,
+    MintConsensusItem,
     VerifiedNotes
 );
 
@@ -1327,7 +1329,6 @@ mod test {
 
         Mint::new(MintConfig {
             consensus: MintConfigConsensus {
-                threshold: THRESHOLD,
                 peer_tbs_pks: mint_server_cfg2[0]
                     .to_typed::<MintConfig>()
                     .unwrap()

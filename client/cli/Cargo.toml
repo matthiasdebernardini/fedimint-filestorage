@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 bitcoin = "0.29.2"
 bitcoin_hashes = "0.11.0"
-clap = { version = "4.0.29", features = ["derive", "std", "help", "usage", "error-context", "suggestions" ], default-features = false }
+clap = { version = "4.1.1", features = ["derive", "std", "help", "usage", "error-context", "suggestions" ], default-features = false }
 lightning-invoice = { version = "0.21.0", features = [ "serde" ] }
 mint-client = { path = "../client-lib" }
 fedimint-api = { path = "../../fedimint-api" }
@@ -26,7 +26,7 @@ serde = { version = "1.0.149", features = [ "derive" ] }
 tokio = { version = "1.23.1", features = ["full"] }
 tracing ="0.1.37"
 tracing-subscriber = { version = "0.3.16", features = [ "env-filter" ] }
-serde_json = "1.0.89"
+serde_json = "1.0.91"
 url = { version = "2.3.1", features = ["serde"] }
 
 [build-dependencies]

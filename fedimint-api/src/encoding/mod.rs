@@ -12,6 +12,9 @@ use std::io::{self, Error, Read, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::format_err;
+use bitcoin_hashes::sha256;
+use bitcoin_hashes::sha256::HashEngine;
+use bitcoin_hashes::Hash;
 pub use fedimint_derive::{Decodable, Encodable, UnzipConsensus};
 use thiserror::Error;
 use url::Url;
@@ -66,6 +69,15 @@ pub trait Encodable {
         let mut bytes = vec![];
         self.consensus_encode(&mut bytes)?;
         Ok(bytes)
+    }
+
+    /// Generate a SHA256 hash of the consensus encoding
+    ///
+    /// Can be used to validate all federation members agree on state without revealing the object
+    fn consensus_hash(&self) -> anyhow::Result<sha256::Hash> {
+        let mut engine = HashEngine::default();
+        self.consensus_encode(&mut engine)?;
+        Ok(sha256::Hash::from_engine(engine))
     }
 }
 
@@ -505,7 +517,7 @@ where
 }
 /// Wrappers for `T` that are `De-Serializable`, while we need them in `Encodable` contex
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
-pub struct SerdeEncodable<T>(T);
+pub struct SerdeEncodable<T>(pub T);
 
 impl<T> Encodable for SerdeEncodable<T>
 where
@@ -664,5 +676,19 @@ mod tests {
     #[test_log::test]
     fn test_systemtime() {
         test_roundtrip(SystemTime::now());
+    }
+
+    #[test]
+    fn test_derive_empty_enum_decode() {
+        #[derive(Debug, Encodable, Decodable)]
+        enum NotConstructable {}
+
+        let vec = vec![42u8];
+        let mut cursor = Cursor::new(vec);
+
+        assert!(
+            NotConstructable::consensus_decode(&mut cursor, &ModuleDecoderRegistry::default())
+                .is_err()
+        );
     }
 }

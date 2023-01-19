@@ -4,20 +4,30 @@ use std::error::Error;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::process::exit;
+use std::sync::Arc;
 
-use bitcoin::{secp256k1, Address, Transaction};
+use bitcoin::{secp256k1, Address, Network, Transaction};
 use clap::{Parser, Subcommand};
 use fedimint_api::config::ClientConfig;
+use fedimint_api::core::{
+    LEGACY_HARDCODED_INSTANCE_ID_LN, LEGACY_HARDCODED_INSTANCE_ID_MINT,
+    LEGACY_HARDCODED_INSTANCE_ID_WALLET,
+};
 use fedimint_api::db::Database;
+use fedimint_api::module::registry::ModuleDecoderRegistry;
 use fedimint_api::task::TaskGroup;
-use fedimint_api::{Amount, NumPeers, OutPoint, TieredMulti, TransactionId};
+use fedimint_api::{Amount, OutPoint, TieredMulti, TransactionId};
 use fedimint_core::config::load_from_file;
+use fedimint_core::modules::ln::common::LightningDecoder;
 use fedimint_core::modules::ln::contracts::ContractId;
-use fedimint_core::modules::smolfs::config::{DummyConfig, DummyConfigConsensus, DummyConfigLocal};
+use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
-use mint_client::api::{WsFederationApi, WsFederationConnect};
+use fedimint_mint::common::MintDecoder;
+use mint_client::api::{
+    FederationApiExt, GlobalFederationApi, IFederationApi, WsFederationApi, WsFederationConnect,
+};
 use mint_client::mint::SpendableNote;
-use mint_client::query::{CurrentConsensus, EventuallyConsistent};
+use mint_client::query::EventuallyConsistent;
 use mint_client::utils::{
     from_hex, parse_bitcoin_amount, parse_ecash, parse_fedimint_amount, parse_node_pub_key,
     serialize_ecash,
@@ -76,7 +86,9 @@ enum CliOutput {
     },
 
     Info {
-        network: String,
+        federation_id: String,
+        federation_name: String,
+        network: Network,
         total_amount: Amount,
         total_num_notes: usize,
         details: BTreeMap<Amount, usize>,
@@ -378,18 +390,12 @@ async fn main() {
         if let Command::JoinFederation { connect } = cli.command {
             let connect_obj: WsFederationConnect = serde_json::from_str(&connect)
                 .or_terminate(CliErrorKind::InvalidValue, "invalid connect info");
-            let api = WsFederationApi::new(connect_obj.members);
-            let cfg: ClientConfig = api
-                .request(
-                    "/config",
-                    (),
-                    CurrentConsensus::new(api.peers().one_honest()),
-                )
-                .await
-                .or_terminate(
-                    CliErrorKind::NetworkError,
-                    "couldn't download config from peer",
-                );
+            let api = Arc::new(WsFederationApi::new(connect_obj.members))
+                as Arc<dyn IFederationApi + Send + Sync + 'static>;
+            let cfg: ClientConfig = api.get_client_config().await.or_terminate(
+                CliErrorKind::NetworkError,
+                "couldn't download config from peer",
+            );
             let cfg_path = cli.workdir.join("client.json");
             std::fs::create_dir_all(&cli.workdir)
                 .or_terminate(CliErrorKind::IOError, "failed to create config directory");
@@ -413,7 +419,13 @@ async fn main() {
 
         let rng = rand::rngs::OsRng;
 
-        let client = Client::new(cfg.clone(), db, Default::default()).await;
+        let decoders = ModuleDecoderRegistry::from_iter([
+            (LEGACY_HARDCODED_INSTANCE_ID_LN, LightningDecoder.into()),
+            (LEGACY_HARDCODED_INSTANCE_ID_MINT, MintDecoder.into()),
+            (LEGACY_HARDCODED_INSTANCE_ID_WALLET, WalletDecoder.into()),
+        ]);
+
+        let client = Client::new(cfg.clone(), decoders, db, Default::default()).await;
 
         let cli_result = handle_command(cli, client, rng).await;
 
@@ -449,12 +461,12 @@ async fn handle_command(
         }
         Command::Api { method, arg } => {
             let arg: Value = serde_json::from_str(&arg).unwrap();
-            let ws_api = WsFederationApi::from_config(client.config().as_ref());
+            let ws_api: Arc<_> = WsFederationApi::from_config(client.config().as_ref()).into();
             let response: Value = ws_api
-                .request(
-                    &method,
-                    arg,
+                .request_with_strategy(
                     EventuallyConsistent::new(ws_api.peers().len()),
+                    method,
+                    vec![arg],
                 )
                 .await
                 .unwrap();
@@ -493,7 +505,7 @@ async fn handle_command(
         Command::Validate { coins } => {
             let validate_result = client.validate_note_signatures(&coins).await;
             let details_vec = coins
-                .iter_tiers()
+                .iter()
                 .map(|(amount, coins)| (amount.to_owned(), coins.len()))
                 .collect();
 
@@ -539,13 +551,15 @@ async fn handle_command(
         Command::Info => {
             let coins = client.coins().await;
             let details_vec = coins
-                .iter_tiers()
+                .iter()
                 .map(|(amount, coins)| (amount.to_owned(), coins.len()))
                 .collect();
             Ok(CliOutput::Info {
-                network: client.wallet_client().config.network.to_string(),
+                federation_id: client.config().as_ref().federation_id.to_string(),
+                federation_name: client.config().as_ref().federation_name.clone(),
+                network: client.wallet_client().config.network,
                 total_amount: (coins.total_amount()),
-                total_num_notes: (coins.item_count()),
+                total_num_notes: (coins.count_items()),
                 details: (details_vec),
             })
         }

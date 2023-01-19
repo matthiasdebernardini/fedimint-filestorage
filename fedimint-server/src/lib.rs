@@ -4,13 +4,15 @@ use std::cmp::min;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::bail;
 use config::ServerConfig;
 use fedimint_api::cancellable::Cancellable;
 use fedimint_api::encoding::DecodeError;
 use fedimint_api::module::registry::ModuleDecoderRegistry;
 use fedimint_api::net::peers::PeerConnections;
-use fedimint_api::task::{TaskGroup, TaskHandle};
+use fedimint_api::task::{sleep, TaskGroup, TaskHandle};
 use fedimint_api::{NumPeers, PeerId};
 use fedimint_core::epoch::{
     ConsensusItem, EpochVerifyError, SerdeConsensusItem, SignedEpochOutcome,
@@ -19,7 +21,8 @@ pub use fedimint_core::*;
 use hbbft::honey_badger::{Batch, HoneyBadger, Message, Step};
 use hbbft::{Epoched, NetworkInfo, Target};
 use itertools::Itertools;
-use mint_client::api::{IFederationApi, WsFederationApi};
+use mint_client::api::WsFederationApi;
+use mint_client::api::{DynFederationApi, GlobalFederationApi};
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -29,11 +32,11 @@ use crate::consensus::{
     ConsensusProposal, FedimintConsensus, HbbftConsensusOutcome, HbbftSerdeConsensusOutcome,
 };
 use crate::db::LastEpochKey;
+use crate::fedimint_api::encoding::Encodable;
 use crate::fedimint_api::net::peers::IPeerConnections;
 use crate::net::connect::{Connector, TlsTcpConnector};
 use crate::net::peers::PeerSlice;
 use crate::net::peers::{PeerConnector, ReconnectPeerConnections};
-use crate::rng::RngGenerator;
 
 /// The actual implementation of the federated mint
 pub mod consensus;
@@ -49,9 +52,6 @@ pub mod config;
 
 /// Implementation of multiplexed peer connections
 pub mod multiplexed;
-
-/// Some abstractions to handle randomness
-mod rng;
 
 type PeerMessage = (PeerId, EpochMessage);
 
@@ -72,7 +72,7 @@ pub struct FedimintServer {
     pub connections: PeerConnections<EpochMessage>,
     pub cfg: ServerConfig,
     pub hbbft: HoneyBadger<Vec<SerdeConsensusItem>, PeerId>,
-    pub api: Arc<dyn IFederationApi>,
+    pub api: DynFederationApi,
     pub peers: BTreeSet<PeerId>,
     pub rejoin_at_epoch: Option<HashMap<u64, HashSet<PeerId>>>,
     pub run_empty_epochs: u64,
@@ -90,11 +90,29 @@ impl FedimintServer {
     ) -> anyhow::Result<()> {
         let server = FedimintServer::new(cfg.clone(), consensus, decoders, task_group).await;
         let server_consensus = server.consensus.clone();
+        let consensus = server
+            .cfg
+            .consensus
+            .to_config_response(&server_consensus.module_inits);
+
         task_group
             .spawn("api-server", |handle| {
                 net::api::run_server(cfg, server_consensus, handle)
             })
             .await;
+
+        loop {
+            info!("Waiting for peers to agree on a consensus config hash");
+            match server.api.download_client_config().await {
+                Ok(response) if response.consensus_hash == consensus.consensus_hash => break,
+                Ok(_) => bail!("Our consensus config doesn't match peers!"),
+                Err(e) => {
+                    warn!("ERROR {:?}", e)
+                }
+            }
+            sleep(Duration::from_millis(1000)).await;
+        }
+
         task_group
             .spawn_local("consensus", move |handle| server.run_consensus(handle))
             .await;
@@ -144,14 +162,14 @@ impl FedimintServer {
             .clone()
             .into_iter()
             .map(|(id, node)| (id, node.url));
-        let api = Arc::new(WsFederationApi::new(api_endpoints.collect()));
+        let api = WsFederationApi::new(api_endpoints.collect());
 
         FedimintServer {
             connections,
             hbbft,
             consensus: Arc::new(consensus),
             cfg: cfg.clone(),
-            api,
+            api: api.into(),
             peers: cfg.local.p2p.keys().cloned().collect(),
             rejoin_at_epoch: None,
             run_empty_epochs: 0,
@@ -240,7 +258,7 @@ impl FedimintServer {
                         last_outcome.epoch,
                         self.last_processed_epoch
                             .as_ref()
-                            .map(|epoch| epoch.outcome.hash()),
+                            .and_then(|epoch| epoch.outcome.consensus_hash().ok()),
                         None,
                         true,
                     )
@@ -249,7 +267,7 @@ impl FedimintServer {
                     let epoch_pk = self.cfg.consensus.epoch_pk_set.public_key();
                     let epoch = self
                         .api
-                        .fetch_epoch_history(epoch_num, epoch_pk)
+                        .fetch_epoch_history(epoch_num, epoch_pk, &self.decoders)
                         .await
                         .expect("fetches history");
 
@@ -448,15 +466,6 @@ impl FedimintServer {
             )
             .await
             .expect("Failed to send rejoin requests");
-    }
-}
-
-pub struct OsRngGen;
-impl RngGenerator for OsRngGen {
-    type Rng = OsRng;
-
-    fn get_rng(&self) -> Self::Rng {
-        OsRng
     }
 }
 

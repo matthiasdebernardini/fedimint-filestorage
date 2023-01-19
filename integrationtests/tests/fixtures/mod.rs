@@ -18,7 +18,7 @@ use bitcoin::KeyPair;
 use bitcoin::{secp256k1, Address};
 use cln_rpc::ClnRpc;
 use fake::FakeLightningTest;
-use fedimint_api::bitcoin_rpc::read_bitcoin_rpc_env_from_global_env;
+use fedimint_api::bitcoin_rpc::read_bitcoin_backend_from_global_env;
 use fedimint_api::cancellable::Cancellable;
 use fedimint_api::config::ClientConfig;
 use fedimint_api::core;
@@ -77,6 +77,7 @@ use rand::RngCore;
 use real::{RealBitcoinTest, RealLightningTest};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -88,7 +89,7 @@ mod real;
 mod utils;
 
 const DEFAULT_P2P_PORT: u16 = 8173;
-const BASE_PORT_INIT: u16 = DEFAULT_P2P_PORT + 10000;
+const BASE_PORT_INIT: u16 = DEFAULT_P2P_PORT + 20000;
 static BASE_PORT: AtomicU16 = AtomicU16::new(BASE_PORT_INIT);
 
 // Helper functions for easier test writing
@@ -149,13 +150,25 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
 
     // in case we need to output logs using 'cargo test -- --nocapture'
     if base_port == BASE_PORT_INIT {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new("info,fedimint::consensus=warn")),
-            )
-            .init();
+        if env::var_os("FEDIMINT_TRACE_CHROME").map_or(false, |x| !x.is_empty()) {
+            let (cr_layer, gaurd) = tracing_chrome::ChromeLayerBuilder::new()
+                .include_args(true)
+                .build();
+            // drop gaurd cause file to written and closed
+            // in this case file will closed after exit of program
+            std::mem::forget(gaurd);
+
+            tracing_subscriber::registry().with(cr_layer).init();
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| EnvFilter::new("info,fedimint::consensus=warn")),
+                )
+                .init();
+        }
     }
+
     let peers = (0..num_peers).map(PeerId::from).collect::<Vec<_>>();
     let params = ServerConfigParams::gen_local(&peers, sats(100000), base_port, "test");
     let max_evil = hbbft::util::max_faulty(peers.len());
@@ -166,23 +179,35 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
         DynModuleGen::from(LightningGen),
     ]);
 
-    match env::var("FM_TEST_DISABLE_MOCKS") {
+    let decoders = module_decode_stubs();
+
+    let fixtures = match env::var("FM_TEST_DISABLE_MOCKS") {
         Ok(s) if s == "1" => {
             info!("Testing with REAL Bitcoin and Lightning services");
+            let mut config_task_group = task_group.make_subgroup().await;
             let (server_config, client_config) = distributed_config(
                 "",
                 &peers,
                 params,
                 module_inits.clone(),
                 max_evil,
-                &mut task_group,
+                &mut config_task_group,
             )
             .await
             .expect("distributed config should not be canceled");
+            config_task_group
+                .shutdown_join_all()
+                .await
+                .expect("Distributed config did not exit cleanly");
 
             let dir = env::var("FM_TEST_DIR").expect("Must have test dir defined for real tests");
             let bitcoin_rpc_url =
-                read_bitcoin_rpc_env_from_global_env().expect("invalid bitcoin rpc url");
+                match read_bitcoin_backend_from_global_env().expect("invalid bitcoin rpc url") {
+                    fedimint_api::bitcoin_rpc::BitcoindRpcBackend::Bitcoind(url) => url,
+                    fedimint_api::bitcoin_rpc::BitcoindRpcBackend::Electrum(_) => {
+                        panic!("Electrum backend not supported for tests")
+                    }
+                };
             let bitcoin_rpc = fedimint_bitcoind::bitcoincore_rpc::make_bitcoind_rpc(
                 &bitcoin_rpc_url,
                 task_group.make_handle(),
@@ -216,31 +241,34 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
 
             let user_db = if env::var("FM_CLIENT_SQLITE") == Ok(s) {
                 let db_name = format!("client-{}", rng().next_u64());
-                Database::new(sqlite(dir.clone(), db_name).await, module_decode_stubs())
+                Database::new(sqlite(dir.clone(), db_name).await, decoders.clone())
             } else {
-                Database::new(rocks(dir.clone()), module_decode_stubs())
+                Database::new(rocks(dir.clone()), decoders.clone())
             };
 
             let user_cfg = UserClientConfig(client_config.clone());
-            let user = UserTest::new(Arc::new(create_user_client(user_cfg, peers, user_db).await));
+            let user = UserTest::new(Arc::new(
+                create_user_client(user_cfg, decoders.clone(), peers, user_db).await,
+            ));
             user.client.await_consensus_block_height(0).await?;
 
             let gateway = GatewayTest::new(
                 lightning_rpc_adapter,
                 client_config.clone(),
+                decoders,
                 lightning.gateway_node_pub_key,
                 base_port + (2 * num_peers) + 1,
             )
             .await;
 
-            Ok(Fixtures {
+            Fixtures {
                 fed,
                 user,
                 bitcoin: Box::new(bitcoin),
                 gateway,
                 lightning: Box::new(lightning),
                 task_group,
-            })
+            }
         }
         _ => {
             info!("Testing with FAKE Bitcoin and Lightning services");
@@ -248,7 +276,8 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
                 ServerConfig::trusted_dealer_gen("", &peers, &params, module_inits.clone(), OsRng);
             let client_config = server_config[&PeerId::from(0)]
                 .consensus
-                .to_client_config(&module_inits);
+                .to_config_response(&module_inits)
+                .client;
 
             let bitcoin = FakeBitcoinTest::new();
             let bitcoin_rpc = || bitcoin.clone().into();
@@ -298,27 +327,38 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
 
             let user_db = Database::new(MemDatabase::new(), module_decode_stubs());
             let user_cfg = UserClientConfig(client_config.clone());
-            let user = UserTest::new(Arc::new(create_user_client(user_cfg, peers, user_db).await));
+            let user = UserTest::new(Arc::new(
+                create_user_client(user_cfg, decoders.clone(), peers, user_db).await,
+            ));
             user.client.await_consensus_block_height(0).await?;
 
             let gateway = GatewayTest::new(
                 ln_rpc_adapter,
                 client_config.clone(),
+                decoders,
                 lightning.gateway_node_pub_key,
                 base_port + (2 * num_peers) + 1,
             )
             .await;
 
-            Ok(Fixtures {
+            Fixtures {
                 fed,
                 user,
                 bitcoin: Box::new(bitcoin),
                 gateway,
                 lightning: Box::new(lightning),
                 task_group,
-            })
+            }
         }
+    };
+
+    // Wait till the gateway has registered itself
+    while fixtures.user.client.fetch_active_gateway().await.is_err() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        info!("Waiting for gateway to register");
     }
+
+    Ok(fixtures)
 }
 
 pub fn peers(peers: &[u16]) -> Vec<PeerId> {
@@ -331,6 +371,7 @@ pub fn peers(peers: &[u16]) -> Vec<PeerId> {
 /// Creates a new user client connected to the given peers
 pub async fn create_user_client(
     config: UserClientConfig,
+    decoders: ModuleDecoderRegistry,
     peers: Vec<PeerId>,
     db: Database,
 ) -> UserClient {
@@ -346,7 +387,7 @@ pub async fn create_user_client(
     )
     .into();
 
-    UserClient::new_with_api(config, db, api, Default::default()).await
+    UserClient::new_with_api(config, decoders, db, api, Default::default()).await
 }
 
 async fn distributed_config(
@@ -399,7 +440,10 @@ async fn distributed_config(
 
     Ok((
         configs.into_iter().collect(),
-        config.consensus.to_client_config(&module_config_gens),
+        config
+            .consensus
+            .to_config_response(&module_config_gens)
+            .client,
     ))
 }
 
@@ -436,6 +480,7 @@ impl GatewayTest {
     async fn new(
         ln_client_adapter: LnRpcAdapter,
         client_config: ClientConfig,
+        decoders: ModuleDecoderRegistry,
         node_pub_key: secp256k1::PublicKey,
         bind_port: u16,
     ) -> Self {
@@ -477,11 +522,11 @@ impl GatewayTest {
             bind_address: bind_addr,
             announce_address: announce_addr,
             password: "abc".into(),
-            default_federation: gw_client_cfg.client_config.federation_id.clone(),
         };
 
         let gateway = LnGateway::new(
             gw_cfg,
+            decoders.clone(),
             ln_rpc,
             client_builder.clone(),
             sender,
@@ -492,7 +537,7 @@ impl GatewayTest {
 
         let client = Arc::new(
             client_builder
-                .build(gw_client_cfg.clone())
+                .build(gw_client_cfg.clone(), decoders)
                 .await
                 .expect("Could not build gateway client"),
         );
@@ -527,6 +572,7 @@ impl UserTest<UserClientConfig> {
     pub async fn new_user_with_peers(&self, peers: Vec<PeerId>) -> UserTest<UserClientConfig> {
         let user = create_user_client(
             self.config.clone(),
+            self.client.decoders().clone(),
             peers,
             Database::new(MemDatabase::new(), module_decode_stubs()),
         )
@@ -557,7 +603,7 @@ impl<T: AsRef<ClientConfig> + Clone> UserTest<T> {
         self.client
             .coins()
             .await
-            .iter_tiers()
+            .iter()
             .flat_map(|(a, c)| repeat(*a).take(c.len()))
             .sorted()
             .collect::<Vec<Amount>>()
@@ -819,7 +865,7 @@ impl FederationTest {
                     svr.fedimint
                         .consensus
                         .modules
-                        .get(LEGACY_HARDCODED_INSTANCE_ID_MINT)
+                        .get_expect(LEGACY_HARDCODED_INSTANCE_ID_MINT)
                         .apply_output(
                             &mut dbtx,
                             &core::DynOutput::from_typed(
@@ -891,7 +937,7 @@ impl FederationTest {
         let wallet = server
             .consensus
             .modules
-            .get(LEGACY_HARDCODED_INSTANCE_ID_WALLET)
+            .get_expect(LEGACY_HARDCODED_INSTANCE_ID_WALLET)
             .as_any()
             .downcast_ref::<Wallet>()
             .unwrap();
@@ -1026,6 +1072,7 @@ impl FederationTest {
             let mut override_modules = override_modules(cfg.clone(), db.clone()).await;
 
             let mut modules = BTreeMap::new();
+            let env_vars = ModuleInitRegistry::get_env_vars_map();
 
             for (kind, gen) in module_inits.legacy_init_order_iter() {
                 let id = cfg.get_module_id_by_kind(kind.clone()).unwrap();
@@ -1038,7 +1085,7 @@ impl FederationTest {
                         .init(
                             cfg.get_module_config(id).unwrap(),
                             db.clone(),
-                            &BTreeMap::new(),
+                            &env_vars,
                             &mut task_group,
                         )
                         .await
