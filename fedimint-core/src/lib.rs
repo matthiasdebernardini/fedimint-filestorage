@@ -1,9 +1,9 @@
 use thiserror::Error;
 
 pub mod modules {
-    pub use fedimint_dummy as dummy;
     pub use fedimint_ln as ln;
     pub use fedimint_mint as mint;
+    pub use fedimint_smolfs as smolfs;
     pub use fedimint_wallet as wallet;
 }
 

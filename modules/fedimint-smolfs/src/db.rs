@@ -17,12 +17,12 @@ impl std::fmt::Display for DbKeyPrefix {
 }
 
 #[derive(Debug, Clone, Encodable, Decodable, Eq, PartialEq, Hash, Serialize)]
-pub struct ExampleKey(pub u64);
+pub struct ExampleKey(pub String);
 
 impl DatabaseKeyPrefixConst for ExampleKey {
     const DB_PREFIX: u8 = DbKeyPrefix::Example as u8;
     type Key = Self;
-    type Value = ();
+    type Value = String;
 }
 
 #[derive(Debug, Encodable, Decodable)]
@@ -31,5 +31,5 @@ pub struct ExampleKeyPrefix;
 impl DatabaseKeyPrefixConst for ExampleKeyPrefix {
     const DB_PREFIX: u8 = DbKeyPrefix::Example as u8;
     type Key = ExampleKey;
-    type Value = ();
+    type Value = String;
 }

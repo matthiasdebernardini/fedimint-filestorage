@@ -1034,9 +1034,9 @@ dependencies = [
  "bitcoin",
  "bitcoin_hashes 0.11.0",
  "fedimint-api",
- "fedimint-dummy",
  "fedimint-ln",
  "fedimint-mint",
+ "fedimint-smolfs",
  "fedimint-wallet",
  "futures",
  "hex",
@@ -1257,6 +1257,24 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fedimint-smolfs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitcoin",
+ "fedimint-api",
+ "futures",
+ "impl-tools",
+ "rand",
+ "rayon",
+ "serde",
+ "strum",
+ "strum_macros",
+ "thiserror",
 ]
 
 [[package]]

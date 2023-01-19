@@ -7,7 +7,7 @@ description = "fedimint-dummy is a dummy example fedimint module."
 license = "MIT"
 
 [lib]
-name = "fedimint-smolfs"
+name = "fedimint_smolfs"
 path = "src/lib.rs"
 
 [dependencies]

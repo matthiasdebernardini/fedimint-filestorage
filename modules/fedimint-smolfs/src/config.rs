@@ -23,8 +23,8 @@ pub struct DummyConfigConsensus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DummyConfigLocal {
-    pub max_size: u64,
-    pub new_user_backup: String,
+    pub pubkey: String,
+    pub backup: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
