@@ -14,8 +14,8 @@ use fedimint_api::config::{
 };
 use fedimint_api::core::{
     ModuleInstanceId, ModuleKind, LEGACY_HARDCODED_INSTANCE_ID_LN,
-    LEGACY_HARDCODED_INSTANCE_ID_MINT, LEGACY_HARDCODED_INSTANCE_ID_WALLET,
-    MODULE_INSTANCE_ID_GLOBAL,
+    LEGACY_HARDCODED_INSTANCE_ID_MINT, LEGACY_HARDCODED_INSTANCE_ID_SMOLFS,
+    LEGACY_HARDCODED_INSTANCE_ID_WALLET, MODULE_INSTANCE_ID_GLOBAL,
 };
 use fedimint_api::db::Database;
 use fedimint_api::module::registry::{ModuleDecoderRegistry, ModuleRegistry};
@@ -25,6 +25,7 @@ use fedimint_api::task::TaskGroup;
 use fedimint_api::{Amount, PeerId};
 pub use fedimint_core::config::*;
 use fedimint_core::modules::mint::MintGenParams;
+use fedimint_core::modules::smolfs::SmolFSConfigGenParams;
 use fedimint_wallet::WalletGenParams;
 use hbbft::crypto::serde_impl::SerdeSecret;
 use hbbft::NetworkInfo;
@@ -221,7 +222,7 @@ impl ModuleInitRegistry {
 
     /// Return legacy initialization order. See [`LegacyInitOrderIter`].
     pub fn legacy_init_order_iter(&self) -> LegacyInitOrderIter {
-        for hardcoded_module in ["mint", "ln", "wallet"] {
+        for hardcoded_module in ["mint", "ln", "wallet", "smolfs"] {
             if !self
                 .0
                 .contains_key(&ModuleKind::from_static_str(hardcoded_module))
@@ -326,6 +327,13 @@ impl Iterator for LegacyInitOrderIter {
             }
             LEGACY_HARDCODED_INSTANCE_ID_WALLET => {
                 let kind = ModuleKind::from_static_str("wallet");
+                Some((
+                    kind.clone(),
+                    self.rest.remove(&kind).expect("checked in constructor"),
+                ))
+            }
+            LEGACY_HARDCODED_INSTANCE_ID_SMOLFS => {
+                let kind = ModuleKind::from_static_str("smolfs");
                 Some((
                     kind.clone(),
                     self.rest.remove(&kind).expect("checked in constructor"),
@@ -773,6 +781,7 @@ impl ServerConfigParams {
                     // TODO this is not very elegant, but I'm planning to get rid of it in a next commit anyway
                     finality_delay,
                 })
+                .attach(SmolFSConfigGenParams { important_param: 1 })
                 .attach(MintGenParams {
                     mint_amounts: ServerConfigParams::gen_denominations(max_denomination),
                 }),

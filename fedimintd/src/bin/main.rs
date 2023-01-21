@@ -5,6 +5,7 @@ use clap::Parser;
 use fedimint_api::db::Database;
 use fedimint_api::module::DynModuleGen;
 use fedimint_api::task::TaskGroup;
+use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
 use fedimint_server::config::ModuleInitRegistry;
@@ -123,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
 
     let decoders = module_inits.decoders(cfg.iter_module_instances())?;

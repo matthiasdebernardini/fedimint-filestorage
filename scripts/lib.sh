@@ -118,7 +118,7 @@ function send_bitcoin() {
     local RECV_ADDRESS
     RECV_ADDRESS=$1
     local SEND_AMT
-    SEND_AMT=$2
+    SEND_AMT=$3
 
     local TX_ID
     TX_ID="$($FM_BTC_CLIENT sendtoaddress $RECV_ADDRESS "$(sat_to_btc $SEND_AMT)")"

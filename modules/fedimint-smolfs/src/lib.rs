@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::{self};
 
@@ -17,15 +17,18 @@ use fedimint_api::module::__reexports::serde_json;
 use fedimint_api::module::audit::Audit;
 use fedimint_api::module::interconnect::ModuleInterconect;
 use fedimint_api::module::{
-    api_endpoint, ApiEndpoint, InputMeta, ModuleError, ModuleGen, TransactionItemAmount,
+    api_endpoint, ApiEndpoint, InputMeta, InputMetadata, ModuleError, ModuleGen,
+    TransactionItemAmount,
 };
 use fedimint_api::net::peers::MuxPeerConnections;
 use fedimint_api::server::DynServerModule;
 use fedimint_api::task::TaskGroup;
 use fedimint_api::{plugin_types_trait_impl, OutPoint, PeerId, ServerModule};
 use impl_tools::autoimpl;
+use secp256k1::All;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{debug, error, info, warn};
 
 use crate::config::{SmolFSConfig, SmolFSConfigConsensus, SmolFSConfigLocal};
 
@@ -33,7 +36,7 @@ pub mod common;
 pub mod config;
 pub mod db;
 
-const KIND: ModuleKind = ModuleKind::from_static_str("SmolFS");
+const KIND: ModuleKind = ModuleKind::from_static_str("smolfs");
 
 /// SmolFS module
 #[derive(Debug)]
@@ -44,14 +47,18 @@ pub struct SmolFS {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct SmolFSOutputConfirmation(pub SmolFSEntry);
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+#[derive(
+    Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable, Default,
+)]
 pub struct SmolFSEntry {
-    pubkey: String,
-    backup: String,
+    pub pubkey: String,
+    pub backup: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct SmolFSVerificationCache;
+pub struct SmolFSVerificationCache {
+    valid_users: HashMap<String, String>,
+}
 
 #[derive(Debug)]
 pub struct SmolFSConfigGenerator;
@@ -155,18 +162,18 @@ pub struct SmolFSConfigGenParams {
 }
 
 impl ModuleGenParams for SmolFSConfigGenParams {
-    const MODULE_NAME: &'static str = "SmolFS";
+    const MODULE_NAME: &'static str = "smolfs";
 }
 
 #[autoimpl(Deref, DerefMut using self.0)]
 #[derive(
     Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable, Default,
 )]
-pub struct SmolFSInput(pub Vec<String>);
+pub struct SmolFSInput(pub Box<SmolFSEntry>);
 
 impl fmt::Display for SmolFSInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DummyInput {:?}", self.0)
+        write!(f, "SmolFSInput {:?}", self.0)
     }
 }
 
@@ -210,18 +217,24 @@ impl ServerModule for SmolFS {
         SmolFSDecoder
     }
 
-    async fn await_consensus_proposal(&self, _dbtx: &mut DatabaseTransaction<'_>) {}
+    async fn await_consensus_proposal(&self, dbtx: &mut DatabaseTransaction<'_>) {
+        info!("await consensus proposal");
+        if self.consensus_proposal(dbtx).await.is_empty() {
+            std::future::pending().await
+        }
+    }
 
     async fn consensus_proposal(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
     ) -> Vec<Self::ConsensusItem> {
+        info!("consensus proposal");
         dbtx.find_by_prefix(&ExampleKeyPrefix)
             .await
             .map(|res| {
                 let res = res.expect("DB Error");
                 SmolFSOutputConfirmation(SmolFSEntry {
-                    pubkey: format!("{:?}", res.0),
+                    pubkey: res.0 .0,
                     backup: res.1,
                 })
             })
@@ -234,6 +247,7 @@ impl ServerModule for SmolFS {
         dbtx: &mut DatabaseTransaction<'b>,
         _consensus_items: Vec<(PeerId, Self::ConsensusItem)>,
     ) {
+        info!("begin consensus epoch");
         let pubkey = self.cfg.local.pubkey.clone();
         let backup = self.cfg.local.backup.clone();
         let a = dbtx
@@ -247,9 +261,21 @@ impl ServerModule for SmolFS {
 
     fn build_verification_cache<'a>(
         &'a self,
-        _inputs: impl Iterator<Item = &'a Self::Input> + Send,
+        inputs: impl Iterator<Item = &'a Self::Input> + Send,
     ) -> Self::VerificationCache {
-        SmolFSVerificationCache
+        info!("build verification");
+
+        // why not
+        let valid_users = inputs
+            .flat_map(|inputs| {
+                let mut h = HashMap::new();
+                h.entry(inputs.pubkey.clone())
+                    .or_insert(inputs.backup.clone());
+                h
+            })
+            .collect();
+
+        SmolFSVerificationCache { valid_users }
     }
 
     async fn validate_input<'a, 'b>(
@@ -259,17 +285,37 @@ impl ServerModule for SmolFS {
         _verification_cache: &Self::VerificationCache,
         _input: &'a Self::Input,
     ) -> Result<InputMeta, ModuleError> {
-        todo!("Get input from config here");
+        info!("validate input");
+        // TODO attach a payment to the backup, include details here
+        // fill the pubkey vectors with payments destined to the guardians
+        // make ecash wallet for fed module then use interconnect to pay to it
+        Ok(InputMeta {
+            amount: TransactionItemAmount {
+                amount: fedimint_api::Amount::from_sats(0),
+                fee: fedimint_api::Amount::from_sats(0),
+            },
+            puk_keys: vec![],
+        })
     }
 
     async fn apply_input<'a, 'b, 'c>(
         &'a self,
-        _interconnect: &'a dyn ModuleInterconect,
-        _dbtx: &mut DatabaseTransaction<'c>,
-        _input: &'b Self::Input,
-        _cache: &Self::VerificationCache,
+        interconnect: &'a dyn ModuleInterconect,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b Self::Input,
+        cache: &Self::VerificationCache,
     ) -> Result<InputMeta, ModuleError> {
-        unimplemented!()
+        info!("Applying input");
+        let meta = self
+            .validate_input(interconnect, dbtx, cache, input)
+            .await?;
+        let input = input.to_owned().0;
+        let pubkey = input.pubkey;
+        let backup = input.backup;
+        let key = ExampleKey(pubkey);
+        let value = backup;
+        dbtx.insert_new_entry(&key, &value).await.expect("DB Error");
+        Ok(meta)
     }
 
     async fn validate_output(
@@ -309,8 +355,8 @@ impl ServerModule for SmolFS {
 
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
         vec![api_endpoint! {
-            "/SmolFS",
-            async |_module: &SmolFS, _dbtx, _request: ()| -> () {
+            "/smolfs",
+            async |_module: &SmolFS, _dbtx, _request: String| -> () {
                 Ok(())
             }
         }]
@@ -326,9 +372,9 @@ impl SmolFS {
 
 // Must be unique.
 // TODO: we need to provide guidence for allocating these
-pub const MODULE_KEY_DUMMY: u16 = 128;
+pub const MODULE_KEY_SMOLFS: u16 = 128;
 plugin_types_trait_impl!(
-    MODULE_KEY_DUMMY,
+    MODULE_KEY_SMOLFS,
     SmolFSInput,
     SmolFSOutput,
     SmolFSOutputOutcome,

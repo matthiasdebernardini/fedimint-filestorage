@@ -17,6 +17,7 @@ use fedimint_api::config::ClientConfig;
 use fedimint_api::module::DynModuleGen;
 use fedimint_api::task::TaskGroup;
 use fedimint_api::Amount;
+use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
 use fedimint_server::config::ModuleInitRegistry;
@@ -141,6 +142,7 @@ async fn post_guardians(
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
     let dir_out_path = state.data_dir.clone();
     let fedimintd_sender = state.sender.clone();

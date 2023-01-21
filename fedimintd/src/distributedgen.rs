@@ -8,6 +8,7 @@ use fedimint_api::module::DynModuleGen;
 use fedimint_api::net::peers::IMuxPeerConnections;
 use fedimint_api::task::TaskGroup;
 use fedimint_api::{Amount, PeerId};
+use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
 use fedimint_server::config::{PeerServerParams, ServerConfig, ServerConfigParams};
@@ -87,6 +88,7 @@ pub async fn run_dkg(
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
 
     let result = ServerConfig::distributed_gen(

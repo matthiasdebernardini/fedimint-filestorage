@@ -35,6 +35,11 @@ pub struct InputMeta {
     pub puk_keys: Vec<XOnlyPublicKey>,
 }
 
+pub struct InputMetadata {
+    pub pubkey: XOnlyPublicKey,
+    pub backup: String,
+}
+
 /// Information about the amount represented by an input or output.
 ///
 /// * For **inputs** the amount is funding the transaction while the fee is consuming funding

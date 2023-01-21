@@ -1176,10 +1176,12 @@ dependencies = [
  "impl-tools",
  "rand",
  "rayon",
+ "secp256k1",
  "serde",
  "strum",
  "strum_macros",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

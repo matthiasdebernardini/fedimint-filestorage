@@ -23,6 +23,7 @@ use fedimint_core::modules::ln::contracts::ContractId;
 use fedimint_core::modules::smolfs::config::{
     SmolFSConfig, SmolFSConfigConsensus, SmolFSConfigLocal,
 };
+use fedimint_core::modules::smolfs::{SmolFSEntry, SmolFSInput};
 use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
 use fedimint_mint::common::MintDecoder;
@@ -452,13 +453,7 @@ async fn handle_command(
     let mut task_group = TaskGroup::new();
     match cli.command {
         Command::Smol { pubkey, backup } => {
-            let _a = SmolFSConfig {
-                local: SmolFSConfigLocal { pubkey, backup },
-                consensus: SmolFSConfigConsensus {
-                    merkle_root: vec![],
-                },
-            };
-            let _ = pubkey;
+            let _a = SmolFSInput(Box::new(SmolFSEntry { pubkey, backup }));
 
             Ok(CliOutput::SmolFS { success: true })
         }
