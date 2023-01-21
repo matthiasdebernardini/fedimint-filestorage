@@ -18,7 +18,6 @@ bincode = "1.3.1"
 bitcoin = { version = "0.29.2", features = [ "rand", "serde" ] }
 bitcoin_hashes = { version = "0.11", features = ["serde"] }
 futures = "0.3.24"
-hex = { version = "0.4.3", features = [ "serde" ] }
 lightning-invoice = "0.21.0"
 fedimint-derive = { path = "../fedimint-derive" }
 hbbft = { git = "https://github.com/jkitman/hbbft", branch = "upgrade-threshold-crypto-libs" }
@@ -43,7 +42,7 @@ gloo-timers = { version = "0.2.5", features = ["futures"] }
 wasm-bindgen-futures = "0.4.33"
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
-tokio = { version = "1.23.1", features = ["full"] }
+tokio = { version = "1.24.2", features = ["full"] }
 
 [dev-dependencies]
 test-log = { version = "0.2", features = [ "trace" ], default-features = false }

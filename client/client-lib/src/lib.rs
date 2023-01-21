@@ -13,6 +13,7 @@ use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::time::SystemTime;
 
+use anyhow::ensure;
 use api::{
     DynFederationApi, FederationError, GlobalFederationApi, LnFederationApi, OutputOutcomeError,
     WalletFederationApi,
@@ -20,7 +21,7 @@ use api::{
 use bitcoin::util::key::KeyPair;
 use bitcoin::{secp256k1, Address, Transaction as BitcoinTransaction};
 use bitcoin_hashes::{sha256, Hash};
-use fedimint_api::config::ClientConfig;
+use fedimint_api::config::{ClientConfig, ModuleGenRegistry};
 use fedimint_api::core::{
     DynDecoder, LEGACY_HARDCODED_INSTANCE_ID_LN, LEGACY_HARDCODED_INSTANCE_ID_MINT,
     LEGACY_HARDCODED_INSTANCE_ID_WALLET,
@@ -153,6 +154,10 @@ impl<C> Client<C> {
     pub fn decoders(&self) -> &ModuleDecoderRegistry {
         &self.context.decoders
     }
+
+    pub fn module_gens(&self) -> &ModuleGenRegistry {
+        &self.context.module_gens
+    }
 }
 
 #[derive(Encodable, Decodable)]
@@ -242,19 +247,38 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
         self.config.clone()
     }
 
+    /// Verifies the config using the federation id
+    //TODO needs to return the signed config hash
+    pub async fn verify_config(&self) -> anyhow::Result<()> {
+        let config = self.context.api.download_client_config().await?;
+        let api_hash = config.client.consensus_hash(&self.context.module_gens)?;
+        let self_hash = self
+            .config
+            .as_ref()
+            .consensus_hash(&self.context.module_gens)?;
+
+        ensure!(
+            api_hash == self_hash,
+            "Our config hash doesn't match federations"
+        );
+        Ok(())
+    }
+
     pub async fn new(
         config: T,
         decoders: ModuleDecoderRegistry,
+        module_gens: ModuleGenRegistry,
         db: Database,
         secp: Secp256k1<All>,
     ) -> Self {
         let api = api::WsFederationApi::from_config(config.as_ref());
-        Self::new_with_api(config, decoders, db, api.into(), secp).await
+        Self::new_with_api(config, decoders, module_gens, db, api.into(), secp).await
     }
 
     pub async fn new_with_api(
         config: T,
         decoders: ModuleDecoderRegistry,
+        module_gens: ModuleGenRegistry,
         db: Database,
         api: DynFederationApi,
         secp: Secp256k1<All>,
@@ -264,6 +288,7 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
             config,
             context: Arc::new(ClientContext {
                 decoders,
+                module_gens,
                 db,
                 api,
                 secp,
@@ -491,15 +516,15 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
         amount: Amount,
         rng: R,
     ) -> Result<TieredMulti<SpendableNote>> {
-        let coins = self.mint_client().select_coins(amount).await?;
+        let notes = self.mint_client().select_notes(amount).await?;
 
-        let final_coins = if coins.total_amount() == amount {
-            coins
+        let final_notes = if notes.total_amount() == amount {
+            notes
         } else {
             let mut tx = TransactionBuilder::default();
-            let change = vec![amount, coins.total_amount() - amount];
+            let change = vec![amount, notes.total_amount() - amount];
 
-            let (mut keys, input) = MintClient::ecash_input(coins)?;
+            let (mut keys, input) = MintClient::ecash_input(notes)?;
             tx.input(&mut keys, input);
             let tx = tx
                 .build_with_change(self.mint_client(), rng, change, &self.context.secp)
@@ -507,16 +532,16 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
 
             self.context.api.submit_transaction(tx).await?;
             self.fetch_all_coins().await;
-            self.mint_client().select_coins(amount).await?
+            self.mint_client().select_notes(amount).await?
         };
         assert_eq!(
-            final_coins.total_amount(),
+            final_notes.total_amount(),
             amount,
             "should have exact change"
         );
 
         let mut dbtx = self.context.db.begin_transaction().await;
-        for (amount, coin) in final_coins.iter_items() {
+        for (amount, coin) in final_notes.iter_items() {
             dbtx.remove_entry(&CoinKey {
                 amount,
                 nonce: coin.note.0,
@@ -526,7 +551,7 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
         }
         dbtx.commit_tx().await.expect("DB Error");
 
-        Ok(final_coins)
+        Ok(final_notes)
     }
 
     /// Tries to fetch e-cash tokens from a certain out point. An error may just mean having queried
@@ -539,9 +564,9 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
         Ok(())
     }
 
-    /// Should be called after any transaction that might have failed in order to get any coin
+    /// Should be called after any transaction that might have failed in order to get any note
     /// inputs back.
-    pub async fn reissue_pending_coins<R: RngCore + CryptoRng>(&self, rng: R) -> Result<OutPoint> {
+    pub async fn reissue_pending_notes<R: RngCore + CryptoRng>(&self, rng: R) -> Result<OutPoint> {
         let mut dbtx = self.context.db.begin_transaction().await;
         let pending = dbtx
             .find_by_prefix(&PendingCoinsKeyPrefix)
@@ -549,9 +574,9 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
             .map(|res| res.expect("DB error"));
 
         let stream = pending
-            .map(|(key, coins)| async move {
+            .map(|(key, notes)| async move {
                 match self.context.api.fetch_tx_outcome(&key.0).await {
-                    Ok(TransactionStatus::Rejected(_)) => Ok((key, coins)),
+                    Ok(TransactionStatus::Rejected(_)) => Ok((key, notes)),
                     Ok(TransactionStatus::Accepted { .. }) => {
                         Ok((key, TieredMulti::<SpendableNote>::default()))
                     }
@@ -561,15 +586,15 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
             .collect::<FuturesUnordered<_>>();
 
         let mut dbtx = self.context.db.begin_transaction().await;
-        let mut all_coins = TieredMulti::<SpendableNote>::default();
+        let mut all_notes = TieredMulti::<SpendableNote>::default();
         for result in stream.collect::<Vec<_>>().await {
-            let (key, coins) = result?;
-            all_coins.extend(coins);
+            let (key, notes) = result?;
+            all_notes.extend(notes);
             dbtx.remove_entry(&key).await.expect("DB Error");
         }
         dbtx.commit_tx().await.expect("DB Error");
 
-        self.reissue(all_coins, rng).await
+        self.reissue(all_notes, rng).await
     }
 
     pub async fn await_consensus_block_height(
@@ -600,8 +625,8 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
             .collect()
     }
 
-    pub async fn coins(&self) -> TieredMulti<SpendableNote> {
-        self.mint_client().coins().await
+    pub async fn notes(&self) -> TieredMulti<SpendableNote> {
+        self.mint_client().notes().await
     }
 
     pub async fn list_active_issuances(&self) -> Vec<(OutPoint, NoteIssuanceRequests)> {

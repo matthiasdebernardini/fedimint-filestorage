@@ -4,13 +4,13 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
+use fedimint_api::config::ModuleGenRegistry;
 use fedimint_api::module::DynModuleGen;
 use fedimint_api::task::TaskGroup;
 use fedimint_api::Amount;
 use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
-use fedimint_server::config::ModuleInitRegistry;
 use fedimint_wallet::WalletGen;
 use fedimintd::distributedgen::{create_cert, run_dkg};
 use fedimintd::encrypt::*;
@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let module_config_gens = ModuleInitRegistry::from(vec![
+    let module_config_gens = ModuleGenRegistry::from(vec![
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),

@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::format_err;
-use fedimint_server::config::{ModuleInitRegistry, ServerConfig};
+use fedimint_api::config::ModuleGenRegistry;
+use fedimint_server::config::ServerConfig;
+use mint_client::api::WsFederationConnect;
 use ring::aead::LessSafeKey;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -27,6 +29,9 @@ pub const LOCAL_CONFIG: &str = "local";
 
 /// Server consensus-only configurable file
 pub const CONSENSUS_CONFIG: &str = "consensus";
+
+/// Client connection string file
+pub const CLIENT_CONNECT_FILE: &str = "client-connect";
 
 /// Salt backup for combining with the private key
 pub const SALT_FILE: &str = "private.salt";
@@ -72,17 +77,19 @@ pub fn encrypted_json_read<T: Serialize + DeserializeOwned>(
 pub fn write_nonprivate_configs(
     server: &ServerConfig,
     path: PathBuf,
-    module_config_gens: &ModuleInitRegistry,
+    module_config_gens: &ModuleGenRegistry,
 ) -> anyhow::Result<()> {
+    let client_config = server
+        .consensus
+        .to_config_response(module_config_gens)
+        .client;
     plaintext_json_write(&server.local, path.join(LOCAL_CONFIG))?;
     plaintext_json_write(&server.consensus, path.join(CONSENSUS_CONFIG))?;
     plaintext_json_write(
-        &server
-            .consensus
-            .to_config_response(module_config_gens)
-            .client,
-        path.join(CLIENT_CONFIG),
-    )
+        &WsFederationConnect::from(&client_config),
+        path.join(CLIENT_CONNECT_FILE),
+    )?;
+    plaintext_json_write(&client_config, path.join(CLIENT_CONFIG))
 }
 
 /// Writes struct into a plaintext json file

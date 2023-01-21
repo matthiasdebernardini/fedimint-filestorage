@@ -9,6 +9,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bitcoin_hashes::sha256;
+use bitcoin_hashes::sha256::Hash;
 use futures::future::BoxFuture;
 use secp256k1_zkp::XOnlyPublicKey;
 use serde::{Deserialize, Serialize};
@@ -33,11 +35,6 @@ use crate::{dyn_newtype_define, Amount, OutPoint, PeerId};
 pub struct InputMeta {
     pub amount: TransactionItemAmount,
     pub puk_keys: Vec<XOnlyPublicKey>,
-}
-
-pub struct InputMetadata {
-    pub pubkey: XOnlyPublicKey,
-    pub backup: String,
 }
 
 /// Information about the amount represented by an input or output.
@@ -89,7 +86,7 @@ pub trait TypedApiEndpoint {
 
     async fn handle<'a, 'b>(
         state: &'a Self::State,
-        dbtx: fedimint_api::db::DatabaseTransaction<'b>,
+        dbtx: &'a mut fedimint_api::db::DatabaseTransaction<'b>,
         params: Self::Param,
     ) -> Result<Self::Response, ApiError>;
 }
@@ -129,7 +126,7 @@ macro_rules! __api_endpoint {
 
             async fn handle<'a, 'b>(
                 $state: &'a Self::State,
-                mut $dbtx: fedimint_api::db::DatabaseTransaction<'b>,
+                $dbtx: &'a mut fedimint_api::db::DatabaseTransaction<'b>,
                 $param: Self::Param,
             ) -> ::std::result::Result<Self::Response, $crate::module::ApiError> {
                 $body
@@ -151,6 +148,7 @@ type HandlerFn<M> = Box<
             &'a M,
             fedimint_api::db::DatabaseTransaction<'a>,
             serde_json::Value,
+            Option<ModuleInstanceId>,
         ) -> HandlerFnReturn<'a>
         + Send
         + Sync,
@@ -172,6 +170,7 @@ pub struct ApiEndpoint<M> {
 impl ApiEndpoint<()> {
     pub fn from_typed<E: TypedApiEndpoint>() -> ApiEndpoint<E::State>
     where
+        <E as TypedApiEndpoint>::Response: std::marker::Send,
         E::Param: Debug,
         E::Response: Debug,
     {
@@ -184,7 +183,7 @@ impl ApiEndpoint<()> {
         )]
         async fn handle_request<'a, 'b, E>(
             state: &'a E::State,
-            dbtx: fedimint_api::db::DatabaseTransaction<'b>,
+            dbtx: &mut fedimint_api::db::DatabaseTransaction<'b>,
             param: E::Param,
         ) -> Result<E::Response, ApiError>
         where
@@ -202,12 +201,25 @@ impl ApiEndpoint<()> {
 
         ApiEndpoint {
             path: E::PATH,
-            handler: Box::new(|m, dbtx, param| {
+            handler: Box::new(|m, mut dbtx, param, module_instance_id| {
                 Box::pin(async move {
                     let params = serde_json::from_value(param)
                         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-                    let ret = handle_request::<E>(m, dbtx, params).await?;
+                    let ret = match module_instance_id {
+                        Some(module_instance_id) => {
+                            let mut module_dbtx = dbtx.with_module_prefix(module_instance_id);
+                            handle_request::<E>(m, &mut module_dbtx, params).await?
+                        }
+                        None => handle_request::<E>(m, &mut dbtx, params).await?,
+                    };
+
+                    dbtx.commit_tx()
+                        .await
+                        .map_err(|_err| fedimint_api::module::ApiError {
+                            code: 500,
+                            message: "Internal Server Error".to_string(),
+                        })?;
                     Ok(serde_json::to_value(ret).expect("encoding error"))
                 })
             }),
@@ -286,6 +298,8 @@ pub trait IModuleGen: Debug {
     fn to_config_response(&self, config: serde_json::Value)
         -> anyhow::Result<ModuleConfigResponse>;
 
+    fn hash_client_module(&self, config: serde_json::Value) -> anyhow::Result<sha256::Hash>;
+
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()>;
 }
 
@@ -337,6 +351,8 @@ pub trait ModuleGen: Debug + Sized {
         -> anyhow::Result<ModuleConfigResponse>;
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()>;
+
+    fn hash_client_module(&self, config: serde_json::Value) -> anyhow::Result<sha256::Hash>;
 }
 
 #[async_trait]
@@ -396,6 +412,10 @@ where
         config: serde_json::Value,
     ) -> anyhow::Result<ModuleConfigResponse> {
         <Self as ModuleGen>::to_config_response(self, config)
+    }
+
+    fn hash_client_module(&self, config: serde_json::Value) -> anyhow::Result<Hash> {
+        <Self as ModuleGen>::hash_client_module(self, config)
     }
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()> {
@@ -486,11 +506,11 @@ pub trait ServerModule: Debug + Sized {
         output: &Self::Output,
     ) -> Result<TransactionItemAmount, ModuleError>;
 
-    /// Try to create an output (e.g. issue coins, peg-out BTC, …). On success all necessary updates
+    /// Try to create an output (e.g. issue notes, peg-out BTC, …). On success all necessary updates
     /// to the database will be part of the `batch`. On failure (e.g. double spend) the batch is
     /// reset and the operation will take no effect.
     ///
-    /// The supplied `out_point` identifies the operation (e.g. a peg-out or coin issuance) and can
+    /// The supplied `out_point` identifies the operation (e.g. a peg-out or note issuance) and can
     /// be used to retrieve its outcome later using `output_status`.
     ///
     /// This function may only be called after `begin_consensus_epoch` and before

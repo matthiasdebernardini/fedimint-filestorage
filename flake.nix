@@ -428,6 +428,13 @@
           doCheck = true;
         });
 
+        cliTestAlwaysFail = craneLib.buildPackage (commonCliTestArgs // {
+          pname = "${commonCliTestArgs.pname}-always-fail";
+          cargoArtifacts = workspaceBuild;
+          cargoTestCommand = "patchShebangs ./scripts ; ./scripts/always-fail-test.sh";
+          doCheck = true;
+        });
+
 
         pkg = { name, dirs, defaultBin ? null }:
           let
@@ -726,6 +733,7 @@
             latency = cliTestLatency;
             cli = cliTestCli;
             rust-tests = cliRustTests;
+            always-fail = cliTestAlwaysFail;
           };
 
           cross = builtins.mapAttrs
@@ -767,10 +775,32 @@
                   ExposedPorts = {
                     "${builtins.toString 8173}/tcp" = { };
                     "${builtins.toString 8174}/tcp" = { };
-                    "${builtins.toString 8175}/tcp" = { };
+                    "${builtins.toString 8176}/tcp" = { };
                   };
                 };
               };
+
+              ln-gateway =
+                let
+                  entrypointScript =
+                    pkgs.writeShellScriptBin "entrypoint" ''
+                      exec bash "${./misc/ln-gateway-container-entrypoint.sh}" "$@"
+                    '';
+                in
+                pkgs.dockerTools.buildLayeredImage {
+                  name = "ln-gateway";
+                  contents = [ ln-gateway gateway-cli pkgs.bash pkgs.coreutils ];
+                  config = {
+                    Cmd = [ ]; # entrypoint will handle empty vs non-empty cmd
+                    Entrypoint = [
+                      "${entrypointScript}/bin/entrypoint"
+                    ];
+                    ExposedPorts = {
+                      "${builtins.toString 8175}/tcp" = { };
+                    };
+                  };
+                  enableFakechroot = true;
+                };
 
               ln-gateway-clightning =
                 let

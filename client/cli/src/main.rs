@@ -8,25 +8,25 @@ use std::sync::Arc;
 
 use bitcoin::{secp256k1, Address, Network, Transaction};
 use clap::{Parser, Subcommand};
-use fedimint_api::config::ClientConfig;
+use fedimint_api::config::{ClientConfig, ModuleGenRegistry};
 use fedimint_api::core::{
     LEGACY_HARDCODED_INSTANCE_ID_LN, LEGACY_HARDCODED_INSTANCE_ID_MINT,
     LEGACY_HARDCODED_INSTANCE_ID_WALLET,
 };
 use fedimint_api::db::Database;
 use fedimint_api::module::registry::ModuleDecoderRegistry;
+use fedimint_api::module::DynModuleGen;
 use fedimint_api::task::TaskGroup;
 use fedimint_api::{Amount, OutPoint, TieredMulti, TransactionId};
 use fedimint_core::config::load_from_file;
 use fedimint_core::modules::ln::common::LightningDecoder;
 use fedimint_core::modules::ln::contracts::ContractId;
-use fedimint_core::modules::smolfs::config::{
-    SmolFSConfig, SmolFSConfigConsensus, SmolFSConfigLocal,
-};
-use fedimint_core::modules::smolfs::{SmolFSEntry, SmolFSInput};
+use fedimint_core::modules::ln::LightningGen;
 use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
+use fedimint_core::modules::wallet::WalletGen;
 use fedimint_mint::common::MintDecoder;
+use fedimint_mint::MintGen;
 use mint_client::api::{
     FederationApiExt, GlobalFederationApi, IFederationApi, WsFederationApi, WsFederationConnect,
 };
@@ -243,7 +243,7 @@ enum Command {
     /// Reissue tokens received from a third party to avoid double spends
     Reissue {
         #[clap(value_parser = parse_ecash)]
-        coins: TieredMulti<SpendableNote>,
+        notes: TieredMulti<SpendableNote>,
     },
 
     /// Validate tokens without claiming them (only checks if signatures valid, does not check if nonce unspent)
@@ -396,10 +396,14 @@ async fn main() {
                 .or_terminate(CliErrorKind::InvalidValue, "invalid connect info");
             let api = Arc::new(WsFederationApi::new(connect_obj.members))
                 as Arc<dyn IFederationApi + Send + Sync + 'static>;
-            let cfg: ClientConfig = api.get_client_config().await.or_terminate(
-                CliErrorKind::NetworkError,
-                "couldn't download config from peer",
-            );
+            let cfg: ClientConfig = api
+                .download_client_config()
+                .await
+                .or_terminate(
+                    CliErrorKind::NetworkError,
+                    "couldn't download config from peer",
+                )
+                .client;
             let cfg_path = cli.workdir.join("client.json");
             std::fs::create_dir_all(&cli.workdir)
                 .or_terminate(CliErrorKind::IOError, "failed to create config directory");
@@ -429,7 +433,13 @@ async fn main() {
             (LEGACY_HARDCODED_INSTANCE_ID_WALLET, WalletDecoder.into()),
         ]);
 
-        let client = Client::new(cfg.clone(), decoders, db, Default::default()).await;
+        let module_gens = ModuleGenRegistry::from(vec![
+            DynModuleGen::from(WalletGen),
+            DynModuleGen::from(MintGen),
+            DynModuleGen::from(LightningGen),
+        ]);
+
+        let client = Client::new(cfg.clone(), decoders, module_gens, db, Default::default()).await;
 
         let cli_result = handle_command(cli, client, rng).await;
 
@@ -492,8 +502,8 @@ async fn handle_command(
                 "peg-in failed (no further information)",
             ),
 
-        Command::Reissue { coins } => {
-            let id = client.reissue(coins, &mut rng).await;
+        Command::Reissue { notes } => {
+            let id = client.reissue(notes, &mut rng).await;
             id.transform(
                 |v| CliOutput::Reissue { id: (v) },
                 CliErrorKind::GeneralFederationError,
@@ -547,7 +557,7 @@ async fn handle_command(
             }
         }
         Command::Info => {
-            let coins = client.coins().await;
+            let coins = client.notes().await;
             let details_vec = coins
                 .iter()
                 .map(|(amount, coins)| (amount.to_owned(), coins.len()))

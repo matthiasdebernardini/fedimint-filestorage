@@ -136,8 +136,8 @@ async fn peg_outs_are_only_allowed_once_per_epoch() -> Result<()> {
         let received2 = bitcoin.mine_block_and_get_received(&address2);
 
         assert_eq!(received1 + received2, sats(1000));
-        user.client.reissue_pending_coins(rng()).await.unwrap();
-        fed.run_consensus_epochs(2).await; // reissue the coins from the tx that failed
+        user.client.reissue_pending_notes(rng()).await.unwrap();
+        fed.run_consensus_epochs(2).await; // reissue the notes from the tx that failed
         user.assert_total_coins(sats(5000 - 1000) - fees).await;
     })
     .await
@@ -237,7 +237,7 @@ async fn ecash_in_wallet_can_sent_through_a_tx() -> Result<()> {
             .await;
         fed.mint_coins_for_user(&user_send, msats(8)).await;
         let coins = vec![msats(1), msats(1), msats(2), msats(4)];
-        assert_eq!(user_send.coin_amounts().await, coins);
+        assert_eq!(user_send.note_amounts().await, coins);
 
         user_receive
             .client
@@ -253,10 +253,10 @@ async fn ecash_in_wallet_can_sent_through_a_tx() -> Result<()> {
         fed.run_consensus_epochs(2).await; // process transaction + sign new coins
 
         user_receive
-            .assert_coin_amounts(vec![msats(1), msats(2), msats(2)])
+            .assert_note_amounts(vec![msats(1), msats(2), msats(2)])
             .await;
         user_send
-            .assert_coin_amounts(vec![msats(1), msats(2)])
+            .assert_note_amounts(vec![msats(1), msats(2)])
             .await;
 
         // verify error occurs if we issue too many of one denomination
@@ -265,7 +265,7 @@ async fn ecash_in_wallet_can_sent_through_a_tx() -> Result<()> {
             .mint_client()
             .set_notes_per_denomination(10)
             .await;
-        let notes = user_receive.client.coins().await;
+        let notes = user_receive.client.notes().await;
         assert_matches!(user_receive.client.reissue(notes, rng()).await, Err(_));
     })
     .await
@@ -906,7 +906,7 @@ async fn runs_consensus_if_new_block() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic]
 async fn audit_negative_balance_sheet_panics() {
-    test(2, |fed, user, _bitcoin, _, _| async move {
+    test(2, |fed, user, _, _, _| async move {
         fed.mint_coins_for_user(&user, sats(2000)).await;
         fed.run_consensus_epochs(1).await;
     })
@@ -920,7 +920,7 @@ async fn unbalanced_transactions_get_rejected() -> Result<()> {
         // cannot make change for this invoice (results in unbalanced tx)
         fed.mine_and_mint(&user, &*bitcoin, sats(1000)).await;
         let mut builder = TransactionBuilder::default();
-        let ecash = user.client.mint_client().coins().await;
+        let ecash = user.client.mint_client().notes().await;
         let (mut keys, input) = MintClient::ecash_input(ecash).unwrap();
         builder.input(&mut keys, input);
 
@@ -1063,7 +1063,15 @@ async fn ecash_can_be_recovered() -> Result<()> {
             .unwrap();
         assert_eq!(user_send.total_coins().await, sats(1500));
 
-        task_group.join_all().await.unwrap();
+        task_group.join_all(None).await.unwrap();
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verifies_client_configs() -> Result<()> {
+    test(2, |_, user, _, _, _| async move {
+        user.client.verify_config().await.expect("verifies");
     })
     .await
 }

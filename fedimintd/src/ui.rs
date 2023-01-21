@@ -13,22 +13,19 @@ use axum::{
 use axum_macros::debug_handler;
 use bitcoin::Network;
 use fedimint_api::bitcoin_rpc::BitcoindRpcBackend;
-use fedimint_api::config::ClientConfig;
-use fedimint_api::module::DynModuleGen;
+use fedimint_api::config::{ClientConfig, ModuleGenRegistry};
 use fedimint_api::task::TaskGroup;
 use fedimint_api::Amount;
-use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
-use fedimint_ln::LightningGen;
-use fedimint_mint::MintGen;
-use fedimint_server::config::ModuleInitRegistry;
-use fedimint_wallet::WalletGen;
+use fedimint_core::util::SanitizedUrl;
 use http::StatusCode;
 use mint_client::api::WsFederationConnect;
 use qrcode_generator::QrCodeEcc;
 use serde::Deserialize;
+use tokio::select;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio_rustls::rustls;
+use tracing::{debug, error};
 use url::Url;
 
 use crate::distributedgen::{create_cert, parse_peer_params, run_dkg};
@@ -56,26 +53,43 @@ async fn home_page(axum::extract::State(_): axum::extract::State<MutableState>) 
 #[derive(Template)]
 #[template(path = "run.html")]
 struct RunTemplate {
-    connection_string: String,
-    has_connection_string: bool,
+    state: RunTemplateState,
+}
+
+enum RunTemplateState {
+    DkgNotStarted,
+    DkgInProgress,
+    DkgDone(String),   // connnection string
+    DkgFailed(String), // error
+    LocalIoError(String),
 }
 
 async fn run_page(axum::extract::State(state): axum::extract::State<MutableState>) -> RunTemplate {
     let state = state.lock().await;
-    let path = state.data_dir.join("client.json");
-    let connection_string: String = match std::fs::File::open(path) {
-        Ok(file) => {
-            let cfg: ClientConfig =
-                serde_json::from_reader(file).expect("Could not parse cfg file.");
-            let connect_info = WsFederationConnect::from(&cfg);
-            serde_json::to_string(&connect_info).expect("should deserialize")
-        }
-        Err(_) => "".into(),
-    };
 
     RunTemplate {
-        connection_string: connection_string.clone(),
-        has_connection_string: !connection_string.is_empty(),
+        state: match state.dkg_state {
+            Some(DkgState::Success) => {
+                let path = state.data_dir.join("client.json");
+                // TODO: refactor be a standalone function
+                match std::fs::File::open(path) {
+                    Ok(file) => match serde_json::from_reader(file) {
+                        Ok(cfg) => {
+                            let connect_info = WsFederationConnect::from(&cfg);
+
+                            RunTemplateState::DkgDone(
+                                serde_json::to_string(&connect_info).expect("should deserialize"),
+                            )
+                        }
+                        Err(e) => RunTemplateState::LocalIoError(e.to_string()),
+                    },
+                    Err(e) => RunTemplateState::LocalIoError(e.to_string()),
+                }
+            }
+            Some(DkgState::Failure(ref e)) => RunTemplateState::DkgFailed(e.to_owned()),
+            Some(DkgState::Running) => RunTemplateState::DkgInProgress,
+            None => RunTemplateState::DkgNotStarted,
+        },
     }
 }
 
@@ -108,6 +122,7 @@ async fn post_guardians(
     axum::extract::State(state): axum::extract::State<MutableState>,
     Form(form): Form<GuardiansForm>,
 ) -> Result<Redirect, UIError> {
+    let state_copy = state.clone();
     let mut state = state.lock().await;
     let params = state.params.clone().expect("invalid state");
     let mut connection_strings: Vec<String> =
@@ -137,13 +152,6 @@ async fn post_guardians(
     let key = get_key(Some(state.password.clone()), state.data_dir.join(SALT_FILE))?;
     let pk_bytes = encrypted_read(&key, state.data_dir.join(TLS_PK))?;
     let max_denomination = Amount::from_msats(100000000000);
-    let (dkg_sender, dkg_receiver) = tokio::sync::oneshot::channel::<UiMessage>();
-    let module_config_gens = ModuleInitRegistry::from(vec![
-        DynModuleGen::from(WalletGen),
-        DynModuleGen::from(MintGen),
-        DynModuleGen::from(LightningGen),
-        DynModuleGen::from(SmolFSConfigGenerator),
-    ]);
     let dir_out_path = state.data_dir.clone();
     let fedimintd_sender = state.sender.clone();
 
@@ -151,18 +159,21 @@ async fn post_guardians(
     if let Some(dkg_task_group) = state.dkg_task_group.clone() {
         tracing::info!("killing dkg task group");
         dkg_task_group
-            .shutdown_join_all()
+            .shutdown_join_all(None)
             .await
             .expect("couldn't shut down dkg task group");
+        state_copy.lock().await.dkg_state = None;
     }
 
     let mut dkg_task_group = state.task_group.make_subgroup().await;
     state.dkg_task_group = Some(dkg_task_group.clone());
+    let module_gens = state.module_gens.clone();
     state
         .task_group
         .spawn("admin UI running DKG", move |_| async move {
             tracing::info!("Running DKG");
 
+            state_copy.lock().await.dkg_state = Some(DkgState::Running);
             let maybe_config = run_dkg(
                 params.bind_p2p,
                 params.bind_api,
@@ -179,7 +190,7 @@ async fn post_guardians(
 
             let write_result = maybe_config.and_then(|server| {
                 encrypted_json_write(&server.private, &key, dir_out_path.join(PRIVATE_CONFIG))?;
-                write_nonprivate_configs(&server, dir_out_path, &module_config_gens)
+                write_nonprivate_configs(&server, dir_out_path, &module_gens)
             });
 
             match write_result {
@@ -187,34 +198,26 @@ async fn post_guardians(
                     tracing::info!("DKG succeeded");
                     // Shut down DKG to prevent port collisions
                     dkg_task_group
-                        .shutdown_join_all()
+                        .shutdown_join_all(None)
                         .await
                         .expect("couldn't shut down DKG task group");
                     // Tell this route that DKG succeeded
-                    dkg_sender
-                        .send(UiMessage::DKGSuccess)
-                        .expect("failed to send over channel");
-                    // Tell this fedimintd that DKG succeeded
+                    state_copy.lock().await.dkg_state = Some(DkgState::Success);
+                    // Tell fedimint that DKG succeeded
                     fedimintd_sender
-                        .send(UiMessage::DKGSuccess)
+                        .send(UiMessage::DkgSuccess)
                         .await
                         .expect("failed to send over channel");
                 }
                 Err(e) => {
                     tracing::info!("DKG failed {:?}", e);
-                    dkg_sender
-                        // TODO: include the error in the message
-                        .send(UiMessage::DKGFailure)
-                        .expect("failed to send over channel");
+                    state_copy.lock().await.dkg_state = Some(DkgState::Failure(e.to_string()));
                 }
             };
         })
         .await;
-    match dkg_receiver.await.expect("failed to read over channel") {
-        UiMessage::DKGSuccess => Ok(Redirect::to("/run")),
-        // TODO: flash a message that it failed
-        UiMessage::DKGFailure => Ok(Redirect::to("/add_guardians")),
-    }
+
+    Ok(Redirect::to("/run"))
 }
 
 #[derive(Template)]
@@ -229,8 +232,14 @@ async fn params_page(
 ) -> UrlConnection {
     let (ro_bitcoin_rpc_type, ro_bitcoin_rpc_url) =
         match fedimint_api::bitcoin_rpc::read_bitcoin_backend_from_global_env() {
-            Ok(BitcoindRpcBackend::Bitcoind(url)) => ("bitcoind", url.to_string()),
-            Ok(BitcoindRpcBackend::Electrum(url)) => ("electrum", url.to_string()),
+            Ok(BitcoindRpcBackend::Bitcoind(url)) => {
+                let url_str = format!("{}", SanitizedUrl::new_borrowed(&url));
+                ("bitcoind", url_str)
+            }
+            Ok(BitcoindRpcBackend::Electrum(url)) => {
+                let url_str = format!("{}", SanitizedUrl::new_borrowed(&url));
+                ("electrum", url_str)
+            }
             Err(e) => ("error", e.to_string()),
         };
     UrlConnection {
@@ -350,13 +359,22 @@ struct State {
     password: String,
     task_group: TaskGroup,
     dkg_task_group: Option<TaskGroup>,
+    module_gens: ModuleGenRegistry,
+    dkg_state: Option<DkgState>,
 }
 type MutableState = Arc<Mutex<State>>;
 
 #[derive(Debug)]
+pub enum DkgState {
+    Running,
+    Success,
+    Failure(String),
+}
+
+#[derive(Debug)]
 pub enum UiMessage {
-    DKGSuccess,
-    DKGFailure,
+    DkgSuccess,
+    DkgFailure(String),
 }
 
 pub async fn run_ui(
@@ -365,14 +383,17 @@ pub async fn run_ui(
     bind_addr: SocketAddr,
     password: String,
     task_group: TaskGroup,
+    module_gens: ModuleGenRegistry,
 ) {
     let state = Arc::new(Mutex::new(State {
         params: None,
         data_dir,
         sender,
         password,
-        task_group,
+        task_group: task_group.clone(),
         dkg_task_group: None,
+        module_gens,
+        dkg_state: None,
     }));
 
     let app = Router::new()
@@ -385,8 +406,17 @@ pub async fn run_ui(
         .route("/qr", get(qr))
         .with_state(state);
 
-    axum::Server::bind(&bind_addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let shutdown_future = task_group.make_handle().make_shutdown_rx().await;
+    let server_future = axum::Server::bind(&bind_addr).serve(app.into_make_service());
+
+    debug!("Starting setup UI server");
+    select! {
+        _ = shutdown_future => {
+            debug!("Setup UI server shutting down");
+        },
+        Err(err) = server_future => {
+            error!(?err, "Setup UI server encountered an error");
+            panic!("Setup UI server crashed");
+        }
+    }
 }

@@ -1,6 +1,8 @@
-use std::error::Error;
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::{error::Error, marker::PhantomData};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -8,6 +10,7 @@ use thiserror::Error;
 use tracing::{trace, warn};
 
 use crate::{
+    core::ModuleInstanceId,
     encoding::{Decodable, Encodable},
     fmt_utils::AbbreviateHexBytes,
 };
@@ -18,22 +21,7 @@ pub use tests::*;
 
 use crate::module::registry::ModuleDecoderRegistry;
 
-#[derive(Debug, Default)]
-pub struct DatabaseInsertOperation {
-    pub key: Vec<u8>,
-    pub value: Vec<u8>,
-}
-
-#[derive(Debug, Default)]
-pub struct DatabaseDeleteOperation {
-    pub key: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub enum DatabaseOperation {
-    Insert(DatabaseInsertOperation),
-    Delete(DatabaseDeleteOperation),
-}
+pub const MODULE_GLOBAL_PREFIX: u8 = 0xff;
 
 pub trait DatabaseKeyPrefixConst {
     const DB_PREFIX: u8;
@@ -75,6 +63,29 @@ struct DatabaseInner<Db: IDatabase + ?Sized> {
     db: Db,
 }
 
+/// Error returned when the autocommit function fails
+#[derive(Debug, Error)]
+pub enum AutocommitError<E> {
+    /// Committing the transaction failed too many times, giving up
+    CommitFailed {
+        /// Number of retries
+        retries: usize,
+        /// Last error on commit
+        last_error: anyhow::Error,
+    },
+    /// Error returned by the closure provided to `autocommit`. If returned no commit was attempted
+    /// in that round
+    ClosureError {
+        /// Retry on which the closure returned an error
+        ///
+        /// Values other than 0 typically indicate a logic error since the closure given to
+        /// `autocommit` should not have side effects and thus keep succeeding if it succeeded once.
+        retries: usize,
+        /// Error returned by the closure
+        error: E,
+    },
+}
+
 impl Database {
     pub fn new(db: impl IDatabase + 'static, module_decoders: ModuleDecoderRegistry) -> Self {
         let inner = DatabaseInner {
@@ -86,7 +97,74 @@ impl Database {
     }
 
     pub async fn begin_transaction(&self) -> DatabaseTransaction {
-        DatabaseTransaction::new(self.0.db.begin_transaction().await, &self.0.module_decoders)
+        DatabaseTransaction::new(
+            self.0.db.begin_transaction().await,
+            self.0.module_decoders.clone(),
+        )
+    }
+
+    /// Runs a closure with a reference to a database transaction and tries to commit the
+    /// transaction if the closure returns `Ok` and rolls it back otherwise. If committing fails the
+    /// closure is run again for up to `max_retries` times. If `max_retries` is `None` it will run
+    /// `usize::MAX` times which is close enough to infinite times.
+    ///
+    /// The closure `tx_fn` provided should not have side effects outside of the database
+    /// transaction provided, or if it does these should be idempotent, since the closure might be
+    /// run multiple times.
+    ///
+    /// # Lifetime Parameters
+    ///
+    /// The higher rank trait bound (HRTB) `'a` that is applied to the the mutable reference to the
+    /// database transaction ensures that the reference lives as least as long as the returned
+    /// future of the closure.
+    ///
+    /// Further, the reference to self (`'s`) must outlive the `DatabaseTransaction<'dt>`. In other
+    /// words, the `DatabaseTransaction` must live as least as long as `self` and that is true as
+    /// the `DatabaseTransaction` is only dropped at the end of the `loop{}`.
+    pub async fn autocommit<'s: 'dt, 'dt, F, T, E>(
+        &'s self,
+        tx_fn: F,
+        max_retries: Option<usize>,
+    ) -> Result<T, AutocommitError<E>>
+    where
+        for<'a> F: Fn(
+            &'a mut DatabaseTransaction<'dt>,
+        ) -> Pin<Box<dyn Future<Output = Result<T, E>> + 'a>>,
+    {
+        let mut retries: usize = 0;
+        loop {
+            let mut dbtx = self.begin_transaction().await;
+
+            match tx_fn(&mut dbtx).await {
+                Ok(val) => {
+                    match dbtx.commit_tx().await {
+                        Ok(()) => {
+                            return Ok(val);
+                        }
+                        Err(e) if max_retries.map(|mr| mr >= retries).unwrap_or(false) => {
+                            return Err(AutocommitError::CommitFailed {
+                                retries,
+                                last_error: e,
+                            });
+                        }
+                        Err(_) => {
+                            // try again
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(AutocommitError::ClosureError { retries, error: e });
+                }
+            };
+
+            // The `checked_add()` function is used to catch the `usize` overflow.
+            // With `usize=32bit` and an assumed time of 1ms per iteration, this would crash
+            // after ~50 days. But if that's the case, something else must be wrong.
+            // With `usize=64bit` it would take much longer, obviously.
+            retries = retries
+                .checked_add(1)
+                .expect("db autocommit retry counter overflowed");
+        } // end of loop
     }
 }
 
@@ -115,8 +193,8 @@ impl Database {
 /// | Type     | Non-Readable Write | Dirty Read | Non-Repeatable Read | Phantom Record | Lost Writes |
 /// | -------- | ------------------ | ---------- | ------------------- | -------------- | ----------- |
 /// | MemoryDB | Prevented          | Prevented  | Prevented           | Prevented      | Possible    |
-/// | SledDB   | Prevented          | Prevented  | Possible            | Possible       | Possible    |
 /// | RocksDB  | Prevented          | Prevented  | Prevented           | Prevented      | Prevented   |
+/// | Sqlite   | Prevented          | Prevented  | Prevented           | Prevented      | Prevented   |
 #[async_trait]
 pub trait IDatabaseTransaction<'a>: 'a + Send {
     async fn raw_insert_bytes(&mut self, key: &[u8], value: Vec<u8>) -> Result<Option<Vec<u8>>>;
@@ -169,10 +247,99 @@ impl Drop for CommitTracker {
     }
 }
 
+/// IsolatedDatabaseTransaction is a wrapper around DatabaseTransaction that is responsible for
+/// inserting and striping prefixes before reading or writing to the database. It does this by
+/// implementing IDatabaseTransaction and manipulating the prefix bytes in the raw insert/get
+/// functions. This is done to isolate modules/module instances from each other inside the database,
+/// which allows the same module to be instantiated twice or two different modules to use the same
+/// key.
+struct IsolatedDatabaseTransaction<'isolated, 'parent: 'isolated, T: Send + Encodable> {
+    inner_tx: &'isolated mut DatabaseTransaction<'parent>,
+    prefix: Vec<u8>,
+    _marker: PhantomData<T>,
+}
+
+impl<'isolated, 'parent: 'isolated, T: Send + Encodable>
+    IsolatedDatabaseTransaction<'isolated, 'parent, T>
+{
+    pub fn new(
+        dbtx: &'isolated mut DatabaseTransaction<'parent>,
+        prefix: T,
+    ) -> IsolatedDatabaseTransaction<'isolated, 'parent, T> {
+        let mut prefix_bytes = vec![MODULE_GLOBAL_PREFIX];
+        prefix
+            .consensus_encode(&mut prefix_bytes)
+            .expect("Error encoding module instance id as prefix");
+        IsolatedDatabaseTransaction {
+            inner_tx: dbtx,
+            prefix: prefix_bytes,
+            _marker: PhantomData::<T>,
+        }
+    }
+}
+
+#[async_trait]
+impl<'isolated, 'parent, T: Send + Encodable + 'isolated> IDatabaseTransaction<'isolated>
+    for IsolatedDatabaseTransaction<'isolated, 'parent, T>
+{
+    async fn raw_insert_bytes(&mut self, key: &[u8], value: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let mut key_with_prefix = self.prefix.clone();
+        key_with_prefix.extend_from_slice(key);
+        self.inner_tx
+            .raw_insert_bytes(key_with_prefix.as_slice(), value)
+            .await
+    }
+
+    async fn raw_get_bytes(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut key_with_prefix = self.prefix.clone();
+        key_with_prefix.extend_from_slice(key);
+        self.inner_tx
+            .raw_get_bytes(key_with_prefix.as_slice())
+            .await
+    }
+
+    async fn raw_remove_entry(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut key_with_prefix = self.prefix.clone();
+        key_with_prefix.extend_from_slice(key);
+        self.inner_tx
+            .raw_remove_entry(key_with_prefix.as_slice())
+            .await
+    }
+
+    async fn raw_find_by_prefix(&mut self, key_prefix: &[u8]) -> PrefixIter<'_> {
+        let mut prefix_with_module = self.prefix.clone();
+        prefix_with_module.extend_from_slice(key_prefix);
+        let raw_prefix = self
+            .inner_tx
+            .raw_find_by_prefix(prefix_with_module.as_slice())
+            .await;
+        Box::new(raw_prefix.map(|pair| match pair {
+            Ok(kv) => {
+                let key = kv.0;
+                let stripped_key = &key[(self.prefix.len())..];
+                Ok((stripped_key.to_vec(), kv.1))
+            }
+            _ => pair,
+        }))
+    }
+
+    async fn commit_tx(self: Box<Self>) -> Result<()> {
+        panic!("DatabaseTransaction inside modules cannot be committed");
+    }
+
+    async fn rollback_tx_to_savepoint(&mut self) {
+        self.inner_tx.rollback_tx_to_savepoint().await
+    }
+
+    async fn set_tx_savepoint(&mut self) {
+        self.inner_tx.set_tx_savepoint().await
+    }
+}
+
 #[doc = " A handle to a type-erased database implementation"]
 pub struct DatabaseTransaction<'a> {
     tx: Box<dyn IDatabaseTransaction<'a> + Send + 'a>,
-    decoders: &'a ModuleDecoderRegistry,
+    decoders: ModuleDecoderRegistry,
     commit_tracker: CommitTracker,
 }
 
@@ -190,17 +357,37 @@ impl<'a> std::ops::DerefMut for DatabaseTransaction<'a> {
     }
 }
 
-impl<'a> DatabaseTransaction<'a> {
+impl<'parent> DatabaseTransaction<'parent> {
     pub fn new(
-        dbtx: Box<dyn IDatabaseTransaction<'a> + Send + 'a>,
-        decoders: &'a ModuleDecoderRegistry,
-    ) -> DatabaseTransaction<'a> {
+        dbtx: Box<dyn IDatabaseTransaction<'parent> + Send + 'parent>,
+        decoders: ModuleDecoderRegistry,
+    ) -> DatabaseTransaction<'parent> {
         DatabaseTransaction {
             tx: dbtx,
             decoders,
             commit_tracker: CommitTracker {
                 is_committed: false,
                 has_writes: false,
+            },
+        }
+    }
+
+    pub fn with_module_prefix<'isolated>(
+        &'isolated mut self,
+        module_instance_id: ModuleInstanceId,
+    ) -> DatabaseTransaction<'isolated>
+    where
+        'parent: 'isolated,
+    {
+        let decoders = self.decoders.clone();
+        let isolated = Box::new(IsolatedDatabaseTransaction::new(self, module_instance_id));
+        DatabaseTransaction {
+            tx: isolated,
+            decoders,
+            // DatabaseTransaction passed to modules cannot be committed, so the commit tracker is set to committed to surpress the warning
+            commit_tracker: CommitTracker {
+                is_committed: true,
+                has_writes: true,
             },
         }
     }
@@ -225,7 +412,7 @@ impl<'a> DatabaseTransaction<'a> {
             std::any::type_name::<K::Value>(),
             AbbreviateHexBytes(&value_bytes)
         );
-        Ok(Some(K::Value::from_bytes(&value_bytes, self.decoders)?))
+        Ok(Some(K::Value::from_bytes(&value_bytes, &self.decoders)?))
     }
 
     pub async fn find_by_prefix<KP>(
@@ -269,7 +456,7 @@ impl<'a> DatabaseTransaction<'a> {
                     std::any::type_name::<K::Value>(),
                     AbbreviateHexBytes(&old_val_bytes)
                 );
-                Ok(Some(K::Value::from_bytes(&old_val_bytes, self.decoders)?))
+                Ok(Some(K::Value::from_bytes(&old_val_bytes, &self.decoders)?))
             }
             None => Ok(None),
         }
@@ -310,7 +497,7 @@ impl<'a> DatabaseTransaction<'a> {
             None => return Ok(None),
         };
 
-        Ok(Some(K::Value::from_bytes(&value_bytes, self.decoders)?))
+        Ok(Some(K::Value::from_bytes(&value_bytes, &self.decoders)?))
     }
 
     pub async fn remove_by_prefix<KP>(&mut self, key_prefix: &KP) -> Result<()>
@@ -472,6 +659,9 @@ mod tests {
 
     #[derive(Debug, Encodable, Decodable, Eq, PartialEq)]
     struct TestVal(u64);
+
+    const TEST_MODULE_PREFIX: u16 = 1;
+    const ALT_MODULE_PREFIX: u16 = 2;
 
     pub async fn verify_insert_elements(db: Database) {
         let mut dbtx = db.begin_transaction().await;
@@ -895,5 +1085,88 @@ mod tests {
         }
 
         assert_eq!(returned_keys, expected_keys);
+    }
+
+    pub async fn verify_module_prefix(db: Database) {
+        let mut test_dbtx = db.begin_transaction().await;
+        {
+            let mut test_module_dbtx = test_dbtx.with_module_prefix(TEST_MODULE_PREFIX);
+
+            assert!(test_module_dbtx
+                .insert_entry(&TestKey(100), &TestVal(101))
+                .await
+                .is_ok());
+
+            assert!(test_module_dbtx
+                .insert_entry(&TestKey(101), &TestVal(102))
+                .await
+                .is_ok());
+        }
+
+        test_dbtx.commit_tx().await.expect("DB Error");
+
+        let mut alt_dbtx = db.begin_transaction().await;
+        {
+            let mut alt_module_dbtx = alt_dbtx.with_module_prefix(ALT_MODULE_PREFIX);
+
+            assert!(alt_module_dbtx
+                .insert_entry(&TestKey(100), &TestVal(103))
+                .await
+                .is_ok());
+
+            assert!(alt_module_dbtx
+                .insert_entry(&TestKey(101), &TestVal(104))
+                .await
+                .is_ok());
+        }
+
+        alt_dbtx.commit_tx().await.expect("DB Error");
+
+        // verfiy test_module_dbtx can only see key/value pairs from its own module
+        let mut test_dbtx = db.begin_transaction().await;
+        let mut test_module_dbtx = test_dbtx.with_module_prefix(TEST_MODULE_PREFIX);
+        assert_eq!(
+            test_module_dbtx.get_value(&TestKey(100)).await.unwrap(),
+            Some(TestVal(101))
+        );
+
+        assert_eq!(
+            test_module_dbtx.get_value(&TestKey(101)).await.unwrap(),
+            Some(TestVal(102))
+        );
+
+        let mut returned_keys = 0;
+        let expected_keys = 2;
+        for res in test_module_dbtx.find_by_prefix(&DbPrefixTestPrefix).await {
+            match res.as_ref().unwrap().0 {
+                TestKey(100) => {
+                    assert!(res.unwrap().1.eq(&TestVal(101)));
+                    returned_keys += 1;
+                }
+                TestKey(101) => {
+                    assert!(res.unwrap().1.eq(&TestVal(102)));
+                    returned_keys += 1;
+                }
+                _ => {
+                    returned_keys += 1;
+                }
+            }
+        }
+
+        assert_eq!(returned_keys, expected_keys);
+
+        let removed = test_module_dbtx.remove_entry(&TestKey(100)).await;
+        assert!(removed.is_ok());
+        assert_eq!(removed.unwrap(), Some(TestVal(101)));
+        assert_eq!(
+            test_module_dbtx.get_value(&TestKey(100)).await.unwrap(),
+            None
+        );
+
+        // test_dbtx on its own wont find the key because it does not use a module prefix
+        let mut test_dbtx = db.begin_transaction().await;
+        assert_eq!(test_dbtx.get_value(&TestKey(101)).await.unwrap(), None);
+
+        test_dbtx.commit_tx().await.expect("DB Error");
     }
 }

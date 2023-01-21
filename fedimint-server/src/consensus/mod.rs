@@ -4,9 +4,12 @@ pub mod debug;
 mod interconnect;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::iter::FromIterator;
+use std::os::unix::prelude::OsStrExt;
 use std::sync::Arc;
 
+use fedimint_api::config::ModuleGenRegistry;
 use fedimint_api::core::ModuleInstanceId;
 use fedimint_api::db::{Database, DatabaseTransaction};
 use fedimint_api::encoding::{Decodable, Encodable};
@@ -23,9 +26,9 @@ use hbbft::honey_badger::Batch;
 use itertools::Itertools;
 use thiserror::Error;
 use tokio::sync::Notify;
-use tracing::{debug, error, info_span, instrument, trace, warn, Instrument};
+use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
 
-use crate::config::{ModuleInitRegistry, ServerConfig};
+use crate::config::ServerConfig;
 use crate::consensus::interconnect::FedimintInterconnect;
 use crate::db::{
     AcceptedTransactionKey, DropPeerKey, DropPeerKeyPrefix, EpochHistoryKey, LastEpochKey,
@@ -69,7 +72,7 @@ pub struct FedimintConsensus {
     /// Configuration describing the federation and containing our secrets
     pub cfg: ServerConfig,
 
-    pub module_inits: ModuleInitRegistry,
+    pub module_inits: ModuleGenRegistry,
 
     pub modules: ServerModuleRegistry,
     /// KV Database into which all state is persisted to recover from in case of a crash
@@ -97,14 +100,46 @@ struct FundingVerifier {
 }
 
 impl FedimintConsensus {
+    pub fn get_env_vars_map() -> BTreeMap<OsString, OsString> {
+        std::env::vars_os()
+            // We currently have no way to enforce that modules are not reading
+            // global environment variables manually, but to set a good example
+            // and expectations we filter them here and pass explicitly.
+            .filter(|(var, _val)| var.as_os_str().as_bytes().starts_with(b"FM_"))
+            .collect()
+    }
+
     pub async fn new(
         cfg: ServerConfig,
         db: Database,
-        module_inits: ModuleInitRegistry,
+        module_inits: ModuleGenRegistry,
         task_group: &mut TaskGroup,
     ) -> anyhow::Result<Self> {
+        let mut modules = BTreeMap::new();
+
+        let env = Self::get_env_vars_map();
+
+        for (module_id, module_cfg) in &cfg.consensus.modules {
+            let kind = module_cfg.kind();
+
+            let Some(init) = module_inits.get(kind) else {
+                anyhow::bail!("Detected configuration for unsupported module kind: {kind}")
+            };
+            info!(module_instance_id = *module_id, kind = %kind, "Init module");
+
+            let module = init
+                .init(
+                    cfg.get_module_config(*module_id)?,
+                    db.clone(),
+                    &env,
+                    task_group,
+                )
+                .await?;
+            modules.insert(*module_id, module);
+        }
+
         Ok(Self {
-            modules: module_inits.init_all(&cfg, &db, task_group).await?,
+            modules: ModuleRegistry::from(modules),
             cfg,
             module_inits,
             db,
@@ -116,7 +151,7 @@ impl FedimintConsensus {
     pub fn new_with_modules(
         cfg: ServerConfig,
         db: Database,
-        module_inits: ModuleInitRegistry,
+        module_inits: ModuleGenRegistry,
         modules: ModuleRegistry<DynServerModule>,
     ) -> Self {
         Self {
@@ -175,7 +210,12 @@ impl FedimintConsensus {
             let cache = module.build_verification_cache(&[input.clone()]);
             let interconnect = self.build_interconnect();
             let meta = module
-                .validate_input(&interconnect, &mut dbtx, &cache, input)
+                .validate_input(
+                    &interconnect,
+                    &mut dbtx.with_module_prefix(input.module_instance_id()),
+                    &cache,
+                    input,
+                )
                 .await
                 .map_err(|e| TransactionSubmissionError::ModuleError(tx_hash, e))?;
 
@@ -188,7 +228,10 @@ impl FedimintConsensus {
             let amount = self
                 .modules
                 .get_expect(output.module_instance_id())
-                .validate_output(&mut dbtx, output)
+                .validate_output(
+                    &mut dbtx.with_module_prefix(output.module_instance_id()),
+                    output,
+                )
                 .await
                 .map_err(|e| TransactionSubmissionError::ModuleError(tx_hash, e))?;
             funding_verifier.add_output(amount);
@@ -210,67 +253,69 @@ impl FedimintConsensus {
         Ok(())
     }
 
-    /// Calculate the result of the `consesnsus_outcome` and save it/them.
+    /// Calculate the result of the `consensus_outcome` and save it/them.
     ///
     /// `reference_rejected_txs` should be `Some` if the `consensus_outcome` is coming from a
     /// a reference (already signed) `OutcomeHistory`, that contains `rejected_txs`,
     /// so we can check it against our own `rejected_txs` we calculate in this function.
-    /// **Note**: `reference_rejecte_txs` **must** come from a validated/trustworthy
+    ///
+    /// **Note**: `reference_rejected_txs` **must** come from a validated/trustworthy
     /// source and be correct, or it can cause a panic.
     #[instrument(skip_all, fields(epoch = consensus_outcome.epoch))]
     pub async fn process_consensus_outcome(
         &self,
         consensus_outcome: HbbftConsensusOutcome,
-        reference_rejected_txs: &Option<BTreeSet<TransactionId>>,
+        reference_rejected_txs: Option<BTreeSet<TransactionId>>,
     ) -> SignedEpochOutcome {
-        let epoch = consensus_outcome.epoch;
-        let outcome = consensus_outcome.clone();
+        let epoch_history = self
+            .db
+            .autocommit(
+                |dbtx| {
+                    let consensus_outcome = consensus_outcome.clone();
+                    let reference_rejected_txs = reference_rejected_txs.clone();
 
-        let UnzipConsensusItem {
-            epoch_outcome_signature_share: _epoch_outcome_signature_share_cis,
-            transaction: transaction_cis,
-            module: module_cis,
-        } = consensus_outcome
-            .contributions
-            .into_iter()
-            .flat_map(|(peer, cis)| cis.into_iter().map(move |ci| (peer, ci)))
-            .unzip_consensus_item();
+                    Box::pin(async move {
+                        let epoch = consensus_outcome.epoch;
+                        let outcome = consensus_outcome.clone();
 
-        let epoch_history = loop {
-            let mut dbtx = self.db.begin_transaction().await;
+                        let UnzipConsensusItem {
+                            epoch_outcome_signature_share: _epoch_outcome_signature_share_cis,
+                            transaction: transaction_cis,
+                            module: module_cis,
+                        } = consensus_outcome
+                            .contributions
+                            .into_iter()
+                            .flat_map(|(peer, cis)| cis.into_iter().map(move |ci| (peer, ci)))
+                            .unzip_consensus_item();
 
-            self.process_module_consensus_items(&mut dbtx, &module_cis)
-                .await;
+                        self.process_module_consensus_items(dbtx, &module_cis).await;
 
-            let rejected_txs = self
-                .process_transactions(&mut dbtx, epoch, &transaction_cis)
-                .await;
+                        let rejected_txs = self
+                            .process_transactions(dbtx, epoch, &transaction_cis)
+                            .await;
 
-            if let Some(reference_rejected_txs) = reference_rejected_txs.as_ref() {
-                // Result of the consensus are supposed to be deterministic.
-                // If our result is not the same as what the (honest) majority of the federation
-                // signed over, it's a catastrophical bug/mismatch of Federation's fedimintd
-                // implementations.
-                assert_eq!(
-                    reference_rejected_txs, &rejected_txs,
-                    "rejected_txs mismatch: reference = {:?} != {:?}",
-                    reference_rejected_txs, rejected_txs
-                );
-            }
+                        if let Some(reference_rejected_txs) = reference_rejected_txs.as_ref() {
+                            // Result of the consensus are supposed to be deterministic.
+                            // If our result is not the same as what the (honest) majority of the federation
+                            // signed over, it's a catastrophical bug/mismatch of Federation's fedimintd
+                            // implementations.
+                            assert_eq!(
+                                reference_rejected_txs, &rejected_txs,
+                                "rejected_txs mismatch: reference = {:?} != {:?}",
+                                reference_rejected_txs, rejected_txs
+                            );
+                        }
 
-            let epoch_history = self
-                .finalize_process_epoch(&mut dbtx, outcome.clone(), rejected_txs)
-                .await;
-
-            match dbtx.commit_tx().await {
-                Ok(()) => {
-                    break epoch_history;
-                }
-                Err(error) => {
-                    error!(%error, "Committing DB transaction failed, retrying!");
-                }
-            }
-        };
+                        let epoch_history = self
+                            .finalize_process_epoch(dbtx, outcome.clone(), rejected_txs)
+                            .await;
+                        Result::<_, ()>::Ok(epoch_history)
+                    })
+                },
+                Some(100),
+            )
+            .await
+            .expect("Committing consensus epoch failed");
 
         let audit = self.audit().await;
         if audit.sum().milli_sat < 0 {
@@ -300,7 +345,7 @@ impl FedimintConsensus {
         for (module_key, module_cis) in per_module_cis {
             self.modules
                 .get_expect(module_key)
-                .begin_consensus_epoch(dbtx, module_cis)
+                .begin_consensus_epoch(&mut dbtx.with_module_prefix(module_key), module_cis)
                 .await;
         }
     }
@@ -380,8 +425,10 @@ impl FedimintConsensus {
             .save_epoch_history(outcome.clone(), dbtx, &mut drop_peers, rejected_txs)
             .await;
 
-        for (_, module) in self.modules.iter_modules() {
-            let module_drop_peers = module.end_consensus_epoch(&epoch_peers, dbtx).await;
+        for (module_key, module) in self.modules.iter_modules() {
+            let module_drop_peers = module
+                .end_consensus_epoch(&epoch_peers, &mut dbtx.with_module_prefix(module_key))
+                .await;
             drop_peers.extend(module_drop_peers);
         }
 
@@ -468,10 +515,11 @@ impl FedimintConsensus {
         let proposal_futures = self
             .modules
             .iter_modules()
-            .map(|(_, module)| {
-                Box::pin(async {
+            .map(|(module_instance_id, module)| {
+                Box::pin(async move {
                     let mut dbtx = self.database_transaction().await;
-                    module.await_consensus_proposal(&mut dbtx).await
+                    let mut module_dbtx = dbtx.with_module_prefix(module_instance_id);
+                    module.await_consensus_proposal(&mut module_dbtx).await
                 })
             })
             .collect::<Vec<_>>();
@@ -503,7 +551,7 @@ impl FedimintConsensus {
         for (instance_id, module) in self.modules.iter_modules() {
             items.extend(
                 module
-                    .consensus_proposal(&mut dbtx, instance_id)
+                    .consensus_proposal(&mut dbtx.with_module_prefix(instance_id), instance_id)
                     .await
                     .into_iter()
                     .map(ConsensusItem::Module),
@@ -537,7 +585,7 @@ impl FedimintConsensus {
                 .get_expect(input.module_instance_id())
                 .apply_input(
                     &self.build_interconnect(),
-                    dbtx,
+                    &mut dbtx.with_module_prefix(input.module_instance_id()),
                     input,
                     caches.get_cache(input.module_instance_id()),
                 )
@@ -556,7 +604,11 @@ impl FedimintConsensus {
             let amount = self
                 .modules
                 .get_expect(output.module_instance_id())
-                .apply_output(dbtx, &output, out_point)
+                .apply_output(
+                    &mut dbtx.with_module_prefix(output.module_instance_id()),
+                    &output,
+                    out_point,
+                )
                 .await
                 .map_err(|e| TransactionSubmissionError::ModuleError(tx_hash, e))?;
             funding_verifier.add_output(amount);
@@ -588,7 +640,11 @@ impl FedimintConsensus {
                 let outcome = self
                     .modules
                     .get_expect(output.module_instance_id())
-                    .output_status(&mut dbtx, outpoint, output.module_instance_id())
+                    .output_status(
+                        &mut dbtx.with_module_prefix(output.module_instance_id()),
+                        outpoint,
+                        output.module_instance_id(),
+                    )
                     .await
                     .expect("the transaction was processed, so should be known");
                 outputs.push((&outcome).into())
@@ -639,8 +695,10 @@ impl FedimintConsensus {
     pub async fn audit(&self) -> Audit {
         let mut dbtx = self.database_transaction().await;
         let mut audit = Audit::default();
-        for (_, module) in self.modules.iter_modules() {
-            module.audit(&mut dbtx, &mut audit).await
+        for (module_instance_id, module) in self.modules.iter_modules() {
+            module
+                .audit(&mut dbtx.with_module_prefix(module_instance_id), &mut audit)
+                .await
         }
         audit
     }

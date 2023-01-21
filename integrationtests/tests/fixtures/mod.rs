@@ -20,7 +20,7 @@ use cln_rpc::ClnRpc;
 use fake::FakeLightningTest;
 use fedimint_api::bitcoin_rpc::read_bitcoin_backend_from_global_env;
 use fedimint_api::cancellable::Cancellable;
-use fedimint_api::config::ClientConfig;
+use fedimint_api::config::{ClientConfig, ModuleGenRegistry};
 use fedimint_api::core;
 use fedimint_api::core::{
     DynModuleConsensusItem as PerModuleConsensusItem, ModuleConsensusItem,
@@ -40,8 +40,8 @@ use fedimint_api::{sats, Amount};
 use fedimint_bitcoind::DynBitcoindRpc;
 use fedimint_ln::{LightningGateway, LightningGen};
 use fedimint_mint::{MintGen, MintOutput};
+use fedimint_server::config::ServerConfigParams;
 use fedimint_server::config::{connect, ServerConfig};
-use fedimint_server::config::{ModuleInitRegistry, ServerConfigParams};
 use fedimint_server::consensus::{ConsensusProposal, HbbftConsensusOutcome};
 use fedimint_server::consensus::{FedimintConsensus, TransactionSubmissionError};
 use fedimint_server::multiplexed::PeerConnectionMultiplexer;
@@ -139,7 +139,7 @@ where
         fixtures.lightning,
     )
     .await;
-    fixtures.task_group.shutdown_join_all().await
+    fixtures.task_group.shutdown_join_all(None).await
 }
 
 /// Generates the fixtures for an integration test and spawns API and HBBFT consensus threads for
@@ -173,7 +173,7 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
     let params = ServerConfigParams::gen_local(&peers, sats(100000), base_port, "test");
     let max_evil = hbbft::util::max_faulty(peers.len());
 
-    let module_inits = ModuleInitRegistry::from(vec![
+    let module_inits = ModuleGenRegistry::from(vec![
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
@@ -196,7 +196,7 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
             .await
             .expect("distributed config should not be canceled");
             config_task_group
-                .shutdown_join_all()
+                .shutdown_join_all(None)
                 .await
                 .expect("Distributed config did not exit cleanly");
 
@@ -233,7 +233,7 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
                 &fed_db,
                 &|| bitcoin_rpc.clone(),
                 &connect_gen,
-                module_inits,
+                module_inits.clone(),
                 |_cfg: ServerConfig, _db| Box::pin(async { BTreeMap::default() }),
                 &mut task_group,
             )
@@ -248,7 +248,14 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
 
             let user_cfg = UserClientConfig(client_config.clone());
             let user = UserTest::new(Arc::new(
-                create_user_client(user_cfg, decoders.clone(), peers, user_db).await,
+                create_user_client(
+                    user_cfg,
+                    decoders.clone(),
+                    module_inits.clone(),
+                    peers,
+                    user_db,
+                )
+                .await,
             ));
             user.client.await_consensus_block_height(0).await?;
 
@@ -256,6 +263,7 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
                 lightning_rpc_adapter,
                 client_config.clone(),
                 decoders,
+                module_inits,
                 lightning.gateway_node_pub_key,
                 base_port + (2 * num_peers) + 1,
             )
@@ -295,7 +303,7 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
                 &fed_db,
                 &bitcoin_rpc,
                 &connect_gen,
-                module_inits,
+                module_inits.clone(),
                 // the things dealing with async makes us do...
                 // if you know how to make it better, please do --dpc
                 |cfg: ServerConfig, db: Database| {
@@ -328,7 +336,14 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
             let user_db = Database::new(MemDatabase::new(), module_decode_stubs());
             let user_cfg = UserClientConfig(client_config.clone());
             let user = UserTest::new(Arc::new(
-                create_user_client(user_cfg, decoders.clone(), peers, user_db).await,
+                create_user_client(
+                    user_cfg,
+                    decoders.clone(),
+                    module_inits.clone(),
+                    peers,
+                    user_db,
+                )
+                .await,
             ));
             user.client.await_consensus_block_height(0).await?;
 
@@ -336,6 +351,7 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
                 ln_rpc_adapter,
                 client_config.clone(),
                 decoders,
+                module_inits,
                 lightning.gateway_node_pub_key,
                 base_port + (2 * num_peers) + 1,
             )
@@ -372,6 +388,7 @@ pub fn peers(peers: &[u16]) -> Vec<PeerId> {
 pub async fn create_user_client(
     config: UserClientConfig,
     decoders: ModuleDecoderRegistry,
+    module_gens: ModuleGenRegistry,
     peers: Vec<PeerId>,
     db: Database,
 ) -> UserClient {
@@ -387,14 +404,14 @@ pub async fn create_user_client(
     )
     .into();
 
-    UserClient::new_with_api(config, decoders, db, api, Default::default()).await
+    UserClient::new_with_api(config, decoders, module_gens, db, api, Default::default()).await
 }
 
 async fn distributed_config(
     code_version: &str,
     peers: &[PeerId],
     params: HashMap<PeerId, ServerConfigParams>,
-    module_config_gens: ModuleInitRegistry,
+    module_config_gens: ModuleGenRegistry,
     _max_evil: usize,
     task_group: &mut TaskGroup,
 ) -> Cancellable<(BTreeMap<PeerId, ServerConfig>, ClientConfig)> {
@@ -481,6 +498,7 @@ impl GatewayTest {
         ln_client_adapter: LnRpcAdapter,
         client_config: ClientConfig,
         decoders: ModuleDecoderRegistry,
+        module_gens: ModuleGenRegistry,
         node_pub_key: secp256k1::PublicKey,
         bind_port: u16,
     ) -> Self {
@@ -527,6 +545,7 @@ impl GatewayTest {
         let gateway = LnGateway::new(
             gw_cfg,
             decoders.clone(),
+            module_gens.clone(),
             ln_rpc,
             client_builder.clone(),
             sender,
@@ -537,7 +556,7 @@ impl GatewayTest {
 
         let client = Arc::new(
             client_builder
-                .build(gw_client_cfg.clone(), decoders)
+                .build(gw_client_cfg.clone(), decoders, module_gens)
                 .await
                 .expect("Could not build gateway client"),
         );
@@ -573,6 +592,7 @@ impl UserTest<UserClientConfig> {
         let user = create_user_client(
             self.config.clone(),
             self.client.decoders().clone(),
+            self.client.module_gens().clone(),
             peers,
             Database::new(MemDatabase::new(), module_decode_stubs()),
         )
@@ -598,10 +618,10 @@ impl<T: AsRef<ClientConfig> + Clone> UserTest<T> {
         (peg_out.fees.amount().into(), out_point)
     }
 
-    /// Returns the amount denominations of all coins from lowest to highest
-    pub async fn coin_amounts(&self) -> Vec<Amount> {
+    /// Returns the amount denominations of all notes from lowest to highest
+    pub async fn note_amounts(&self) -> Vec<Amount> {
         self.client
-            .coins()
+            .notes()
             .await
             .iter()
             .flat_map(|(a, c)| repeat(*a).take(c.len()))
@@ -611,16 +631,16 @@ impl<T: AsRef<ClientConfig> + Clone> UserTest<T> {
 
     /// Returns sum total of all coins
     pub async fn total_coins(&self) -> Amount {
-        self.client.coins().await.total_amount()
+        self.client.notes().await.total_amount()
     }
 
     pub async fn assert_total_coins(&self, amount: Amount) {
         self.client.fetch_all_coins().await;
         assert_eq!(self.total_coins().await, amount);
     }
-    pub async fn assert_coin_amounts(&self, amounts: Vec<Amount>) {
+    pub async fn assert_note_amounts(&self, amounts: Vec<Amount>) {
         self.client.fetch_all_coins().await;
-        assert_eq!(self.coin_amounts().await, amounts);
+        assert_eq!(self.note_amounts().await, amounts);
     }
 }
 
@@ -731,7 +751,7 @@ impl FederationTest {
         let coins = user
             .client
             .mint_client()
-            .select_coins(amount)
+            .select_notes(amount)
             .await
             .unwrap();
         if coins.total_amount() == amount {
@@ -793,15 +813,21 @@ impl FederationTest {
                 let svr = server.borrow_mut();
                 let mut dbtx = svr.database.begin_transaction().await;
 
-                dbtx.insert_new_entry(
-                    &UTXOKey(input.outpoint()),
-                    &SpendableUTXO {
-                        tweak: input.tweak_contract_key().serialize(),
-                        amount: bitcoin::Amount::from_sat(input.tx_output().value),
-                    },
-                )
-                .await
-                .expect("DB Error");
+                {
+                    let mut module_dbtx =
+                        dbtx.with_module_prefix(LEGACY_HARDCODED_INSTANCE_ID_WALLET);
+                    module_dbtx
+                        .insert_new_entry(
+                            &UTXOKey(input.outpoint()),
+                            &SpendableUTXO {
+                                tweak: input.tweak_contract_key().serialize(),
+                                amount: bitcoin::Amount::from_sat(input.tx_output().value),
+                            },
+                        )
+                        .await
+                        .expect("DB Error");
+                }
+
                 dbtx.commit_tx().await.expect("DB Error");
             });
         }
@@ -867,7 +893,7 @@ impl FederationTest {
                         .modules
                         .get_expect(LEGACY_HARDCODED_INSTANCE_ID_MINT)
                         .apply_output(
-                            &mut dbtx,
+                            &mut dbtx.with_module_prefix(LEGACY_HARDCODED_INSTANCE_ID_MINT),
                             &core::DynOutput::from_typed(
                                 LEGACY_HARDCODED_INSTANCE_ID_MINT,
                                 MintOutput(tokens.clone()),
@@ -889,9 +915,10 @@ impl FederationTest {
     pub async fn broadcast_transactions(&self) {
         for server in &self.servers {
             let svr = server.borrow();
-            let dbtx = block_on(svr.database.begin_transaction());
+            let mut dbtx = block_on(svr.database.begin_transaction());
+            let module_dbtx = dbtx.with_module_prefix(LEGACY_HARDCODED_INSTANCE_ID_WALLET);
             block_on(fedimint_wallet::broadcast_pending_tx(
-                dbtx,
+                module_dbtx,
                 &svr.bitcoin_rpc,
             ));
         }
@@ -942,7 +969,8 @@ impl FederationTest {
             .downcast_ref::<Wallet>()
             .unwrap();
         let mut dbtx = block_on(server.consensus.db.begin_transaction());
-        let height = block_on(wallet.consensus_height(&mut dbtx)).unwrap_or(0);
+        let mut module_dbtx = dbtx.with_module_prefix(LEGACY_HARDCODED_INSTANCE_ID_WALLET);
+        let height = block_on(wallet.consensus_height(&mut module_dbtx)).unwrap_or(0);
         let proposal = block_on(server.consensus.get_consensus_proposal());
 
         for item in proposal.items {
@@ -1054,7 +1082,7 @@ impl FederationTest {
         database_gen: &impl Fn(ModuleDecoderRegistry) -> Database,
         bitcoin_gen: &impl Fn() -> DynBitcoindRpc,
         connect_gen: &impl Fn(&ServerConfig) -> PeerConnector<EpochMessage>,
-        module_inits: ModuleInitRegistry,
+        module_inits: ModuleGenRegistry,
         override_modules: impl Fn(
             ServerConfig,
             Database,
@@ -1072,7 +1100,7 @@ impl FederationTest {
             let mut override_modules = override_modules(cfg.clone(), db.clone()).await;
 
             let mut modules = BTreeMap::new();
-            let env_vars = ModuleInitRegistry::get_env_vars_map();
+            let env_vars = FedimintConsensus::get_env_vars_map();
 
             for (kind, gen) in module_inits.legacy_init_order_iter() {
                 let id = cfg.get_module_id_by_kind(kind.clone()).unwrap();

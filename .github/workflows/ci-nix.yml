@@ -77,6 +77,10 @@ jobs:
       - name: Integration Tests (no fixtures)
         run: nix build -L .#debug.cli-test.rust-tests
 
+      - name: Always fail
+        # this must fail, so we know nix build is actually running tests
+        run: "! nix build -L .#debug.cli-test.always-fail"
+
 
   # Code Coverage will build using a completely different profile (neither debug/release)
   # Which means we can not reuse much from `build` job. Might as well run it as another
@@ -140,6 +144,10 @@ jobs:
     runs-on: buildjet-8vcpu-ubuntu-2004
     timeout-minutes: 30
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+      - name: Prepare
+        uses: ./.github/actions/prepare
       - uses: actions/checkout@v3
       - uses: cachix/install-nix-action@v18
         with:
@@ -165,6 +173,11 @@ jobs:
           nix build -L .#container.fedimint-cli
           echo "mint_client_cli_container_tag=$(docker load < result | awk '{ print $3 }')" >> $GITHUB_ENV
 
+      - name: Build ln-gateway container
+        run: |
+          nix build -L .#container.ln-gateway
+          echo "ln_gateway_container_tag=$(docker load < result | awk '{ print $3 }')" >> $GITHUB_ENV
+
       - name: Login to Docker Hub
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/kody-setup-rebase'
         uses: docker/login-action@v2
@@ -175,9 +188,9 @@ jobs:
       - name: Publish
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/kody-setup-rebase'
         run: |
-          nix_tag=${{ env.fedimintd_container_tag }} && hub_tag="fedimint/fedimintd:${GITHUB_SHA}" && docker tag "$nix_tag" "$hub_tag" && docker push "$hub_tag"
-          nix_tag=${{ env.ln_gateway_clightning_container_tag }} && hub_tag="fedimint/ln-gateway-clightning:${GITHUB_SHA}" && docker tag "$nix_tag" "$hub_tag" && docker push "$hub_tag"
-          nix_tag=${{ env.mint_client_cli_container_tag }} && hub_tag="fedimint/fedimint-cli:${GITHUB_SHA}" && docker tag "$nix_tag" "$hub_tag" && docker push "$hub_tag"
+          nix_tag=${{ env.fedimintd_container_tag }} && hub_tag="fedimint/fedimintd:${LAST_COMMIT_SHA}" && docker tag "$nix_tag" "$hub_tag" && docker push "$hub_tag"
+          nix_tag=${{ env.ln_gateway_clightning_container_tag }} && hub_tag="fedimint/ln-gateway-clightning:${LAST_COMMIT_SHA}" && docker tag "$nix_tag" "$hub_tag" && docker push "$hub_tag"
+          nix_tag=${{ env.mint_client_cli_container_tag }} && hub_tag="fedimint/fedimint-cli:${LAST_COMMIT_SHA}" && docker tag "$nix_tag" "$hub_tag" && docker push "$hub_tag"
 
       - name: Publish master tag
         if: github.ref == 'refs/heads/master'
