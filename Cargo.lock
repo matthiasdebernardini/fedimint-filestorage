@@ -1034,24 +1034,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fedimint-dummy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bitcoin",
- "fedimint-api",
- "futures",
- "impl-tools",
- "rand",
- "rayon",
- "serde",
- "strum",
- "strum_macros",
- "thiserror",
-]
-
-[[package]]
 name = "fedimint-ln"
 version = "0.1.0"
 dependencies = [
