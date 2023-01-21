@@ -20,6 +20,9 @@ use fedimint_api::{Amount, OutPoint, TieredMulti, TransactionId};
 use fedimint_core::config::load_from_file;
 use fedimint_core::modules::ln::common::LightningDecoder;
 use fedimint_core::modules::ln::contracts::ContractId;
+use fedimint_core::modules::smolfs::config::{
+    SmolFSConfig, SmolFSConfigConsensus, SmolFSConfigLocal,
+};
 use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
 use fedimint_mint::common::MintDecoder;
@@ -41,7 +44,7 @@ use tracing_subscriber::EnvFilter;
 #[serde(rename_all(serialize = "snake_case"))]
 #[serde(untagged)]
 enum CliOutput {
-    Dummy {
+    SmolFS {
         success: bool,
     },
     VersionHash {
@@ -449,15 +452,15 @@ async fn handle_command(
     let mut task_group = TaskGroup::new();
     match cli.command {
         Command::Smol { pubkey, backup } => {
-            let _a = DummyConfig {
-                local: DummyConfigLocal { pubkey, backup },
-                consensus: DummyConfigConsensus {
+            let _a = SmolFSConfig {
+                local: SmolFSConfigLocal { pubkey, backup },
+                consensus: SmolFSConfigConsensus {
                     merkle_root: vec![],
                 },
             };
             let _ = pubkey;
 
-            Ok(CliOutput::Dummy { success: true })
+            Ok(CliOutput::SmolFS { success: true })
         }
         Command::Api { method, arg } => {
             let arg: Value = serde_json::from_str(&arg).unwrap();

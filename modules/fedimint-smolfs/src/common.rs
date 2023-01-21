@@ -4,36 +4,36 @@ use fedimint_api::core::Decoder;
 use fedimint_api::encoding::{Decodable, DecodeError};
 use fedimint_api::module::registry::ModuleDecoderRegistry;
 
-use crate::{DummyInput, DummyOutput, DummyOutputConfirmation, DummyOutputOutcome};
+use crate::{SmolFSInput, SmolFSOutput, SmolFSOutputConfirmation, SmolFSOutputOutcome};
 
 #[derive(Debug, Default, Clone)]
-pub struct DummyDecoder;
+pub struct SmolFSDecoder;
 
-impl Decoder for DummyDecoder {
-    type Input = DummyInput;
-    type Output = DummyOutput;
-    type OutputOutcome = DummyOutputOutcome;
-    type ConsensusItem = DummyOutputConfirmation;
+impl Decoder for SmolFSDecoder {
+    type Input = SmolFSInput;
+    type Output = SmolFSOutput;
+    type OutputOutcome = SmolFSOutputOutcome;
+    type ConsensusItem = SmolFSOutputConfirmation;
 
-    fn decode_input(&self, mut d: &mut dyn io::Read) -> Result<DummyInput, DecodeError> {
-        DummyInput::consensus_decode(&mut d, &ModuleDecoderRegistry::default())
+    fn decode_input(&self, mut d: &mut dyn io::Read) -> Result<SmolFSInput, DecodeError> {
+        SmolFSInput::consensus_decode(&mut d, &ModuleDecoderRegistry::default())
     }
 
-    fn decode_output(&self, mut d: &mut dyn io::Read) -> Result<DummyOutput, DecodeError> {
-        DummyOutput::consensus_decode(&mut d, &ModuleDecoderRegistry::default())
+    fn decode_output(&self, mut d: &mut dyn io::Read) -> Result<SmolFSOutput, DecodeError> {
+        SmolFSOutput::consensus_decode(&mut d, &ModuleDecoderRegistry::default())
     }
 
     fn decode_output_outcome(
         &self,
         mut d: &mut dyn io::Read,
-    ) -> Result<DummyOutputOutcome, DecodeError> {
-        DummyOutputOutcome::consensus_decode(&mut d, &ModuleDecoderRegistry::default())
+    ) -> Result<SmolFSOutputOutcome, DecodeError> {
+        SmolFSOutputOutcome::consensus_decode(&mut d, &ModuleDecoderRegistry::default())
     }
 
     fn decode_consensus_item(
         &self,
         mut r: &mut dyn io::Read,
-    ) -> Result<DummyOutputConfirmation, DecodeError> {
-        DummyOutputConfirmation::consensus_decode(&mut r, &ModuleDecoderRegistry::default())
+    ) -> Result<SmolFSOutputConfirmation, DecodeError> {
+        SmolFSOutputConfirmation::consensus_decode(&mut r, &ModuleDecoderRegistry::default())
     }
 }

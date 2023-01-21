@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fmt::{self};
 
 use async_trait::async_trait;
-use common::DummyDecoder;
+use common::SmolFSDecoder;
 use db::{ExampleKey, ExampleKeyPrefix};
 use fedimint_api::cancellable::Cancellable;
 use fedimint_api::config::{
@@ -27,22 +27,22 @@ use impl_tools::autoimpl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::config::{DummyConfig, DummyConfigConsensus, DummyConfigLocal};
+use crate::config::{SmolFSConfig, SmolFSConfigConsensus, SmolFSConfigLocal};
 
 pub mod common;
 pub mod config;
 pub mod db;
 
-const KIND: ModuleKind = ModuleKind::from_static_str("dummy");
+const KIND: ModuleKind = ModuleKind::from_static_str("SmolFS");
 
-/// Dummy module
+/// SmolFS module
 #[derive(Debug)]
-pub struct Dummy {
-    pub cfg: DummyConfig,
+pub struct SmolFS {
+    pub cfg: SmolFSConfig,
 }
 #[autoimpl(Deref, DerefMut using self.0)]
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub struct DummyOutputConfirmation(pub SmolFSEntry);
+pub struct SmolFSOutputConfirmation(pub SmolFSEntry);
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct SmolFSEntry {
@@ -51,18 +51,18 @@ pub struct SmolFSEntry {
 }
 
 #[derive(Debug, Clone)]
-pub struct DummyVerificationCache;
+pub struct SmolFSVerificationCache;
 
 #[derive(Debug)]
-pub struct DummyConfigGenerator;
+pub struct SmolFSConfigGenerator;
 
 #[async_trait]
-impl ModuleGen for DummyConfigGenerator {
+impl ModuleGen for SmolFSConfigGenerator {
     const KIND: ModuleKind = KIND;
-    type Decoder = DummyDecoder;
+    type Decoder = SmolFSDecoder;
 
-    fn decoder(&self) -> DummyDecoder {
-        DummyDecoder
+    fn decoder(&self) -> SmolFSDecoder {
+        SmolFSDecoder
     }
 
     async fn init(
@@ -72,7 +72,7 @@ impl ModuleGen for DummyConfigGenerator {
         _env: &BTreeMap<OsString, OsString>,
         _task_group: &mut TaskGroup,
     ) -> anyhow::Result<DynServerModule> {
-        Ok(Dummy::new(cfg.to_typed()?).into())
+        Ok(SmolFS::new(cfg.to_typed()?).into())
     }
 
     fn trusted_dealer_gen(
@@ -81,17 +81,17 @@ impl ModuleGen for DummyConfigGenerator {
         params: &ConfigGenParams,
     ) -> BTreeMap<PeerId, ServerModuleConfig> {
         let params = params
-            .get::<DummyConfigGenParams>()
+            .get::<SmolFSConfigGenParams>()
             .expect("Invalid mint params");
-        let mint_cfg: BTreeMap<_, DummyConfig> = peers
+        let mint_cfg: BTreeMap<_, SmolFSConfig> = peers
             .iter()
             .map(|&peer| {
-                let config = DummyConfig {
-                    local: DummyConfigLocal {
+                let config = SmolFSConfig {
+                    local: SmolFSConfigLocal {
                         pubkey: String::new(),
                         backup: String::new(),
                     },
-                    consensus: DummyConfigConsensus {
+                    consensus: SmolFSConfigConsensus {
                         merkle_root: vec![],
                     },
                 };
@@ -115,15 +115,15 @@ impl ModuleGen for DummyConfigGenerator {
         _task_group: &mut TaskGroup,
     ) -> anyhow::Result<Cancellable<ServerModuleConfig>> {
         let _params = params
-            .get::<DummyConfigGenParams>()
+            .get::<SmolFSConfigGenParams>()
             .expect("Invalid mint params");
 
-        let server = DummyConfig {
-            local: DummyConfigLocal {
+        let server = SmolFSConfig {
+            local: SmolFSConfigLocal {
                 pubkey: String::new(),
                 backup: String::new(),
             },
-            consensus: DummyConfigConsensus {
+            consensus: SmolFSConfigConsensus {
                 merkle_root: vec![],
             },
         };
@@ -135,7 +135,7 @@ impl ModuleGen for DummyConfigGenerator {
         &self,
         config: serde_json::Value,
     ) -> anyhow::Result<ModuleConfigResponse> {
-        let config = serde_json::from_value::<DummyConfigConsensus>(config)?;
+        let config = serde_json::from_value::<SmolFSConfigConsensus>(config)?;
 
         Ok(ModuleConfigResponse {
             client: config.to_client_config(),
@@ -144,27 +144,27 @@ impl ModuleGen for DummyConfigGenerator {
     }
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()> {
-        config.to_typed::<DummyConfig>()?.validate_config(identity)
+        config.to_typed::<SmolFSConfig>()?.validate_config(identity)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DummyConfigGenParams {
+pub struct SmolFSConfigGenParams {
     //TODO:Change to max size of buffer
     pub important_param: u64,
 }
 
-impl ModuleGenParams for DummyConfigGenParams {
-    const MODULE_NAME: &'static str = "dummy";
+impl ModuleGenParams for SmolFSConfigGenParams {
+    const MODULE_NAME: &'static str = "SmolFS";
 }
 
 #[autoimpl(Deref, DerefMut using self.0)]
 #[derive(
     Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable, Default,
 )]
-pub struct DummyInput(pub Vec<String>);
+pub struct SmolFSInput(pub Vec<String>);
 
-impl fmt::Display for DummyInput {
+impl fmt::Display for SmolFSInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DummyInput {:?}", self.0)
     }
@@ -173,41 +173,41 @@ impl fmt::Display for DummyInput {
 #[derive(
     Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable, Default,
 )]
-pub struct DummyOutput();
+pub struct SmolFSOutput();
 
-impl fmt::Display for DummyOutput {
+impl fmt::Display for SmolFSOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DummyOutput")
     }
 }
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub struct DummyOutputOutcome;
+pub struct SmolFSOutputOutcome;
 
-impl fmt::Display for DummyOutputOutcome {
+impl fmt::Display for SmolFSOutputOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DummyOutputOutcome")
     }
 }
 
-impl fmt::Display for DummyOutputConfirmation {
+impl fmt::Display for SmolFSOutputConfirmation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DummyOutputConfirmation")
     }
 }
 
 #[async_trait]
-impl ServerModule for Dummy {
+impl ServerModule for SmolFS {
     const KIND: ModuleKind = KIND;
 
-    type Decoder = DummyDecoder;
-    type Input = DummyInput;
-    type Output = DummyOutput;
-    type OutputOutcome = DummyOutputOutcome;
-    type ConsensusItem = DummyOutputConfirmation;
-    type VerificationCache = DummyVerificationCache;
+    type Decoder = SmolFSDecoder;
+    type Input = SmolFSInput;
+    type Output = SmolFSOutput;
+    type OutputOutcome = SmolFSOutputOutcome;
+    type ConsensusItem = SmolFSOutputConfirmation;
+    type VerificationCache = SmolFSVerificationCache;
 
     fn decoder(&self) -> Self::Decoder {
-        DummyDecoder
+        SmolFSDecoder
     }
 
     async fn await_consensus_proposal(&self, _dbtx: &mut DatabaseTransaction<'_>) {}
@@ -220,7 +220,7 @@ impl ServerModule for Dummy {
             .await
             .map(|res| {
                 let res = res.expect("DB Error");
-                DummyOutputConfirmation(SmolFSEntry {
+                SmolFSOutputConfirmation(SmolFSEntry {
                     pubkey: format!("{:?}", res.0),
                     backup: res.1,
                 })
@@ -249,7 +249,7 @@ impl ServerModule for Dummy {
         &'a self,
         _inputs: impl Iterator<Item = &'a Self::Input> + Send,
     ) -> Self::VerificationCache {
-        DummyVerificationCache
+        SmolFSVerificationCache
     }
 
     async fn validate_input<'a, 'b>(
@@ -259,8 +259,7 @@ impl ServerModule for Dummy {
         _verification_cache: &Self::VerificationCache,
         _input: &'a Self::Input,
     ) -> Result<InputMeta, ModuleError> {
-        todo!("check that its a valid pubkey");
-        todo!("check that backup isn't too large");
+        todo!("Get input from config here");
     }
 
     async fn apply_input<'a, 'b, 'c>(
@@ -310,18 +309,18 @@ impl ServerModule for Dummy {
 
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
         vec![api_endpoint! {
-            "/dummy",
-            async |_module: &Dummy, _dbtx, _request: ()| -> () {
+            "/SmolFS",
+            async |_module: &SmolFS, _dbtx, _request: ()| -> () {
                 Ok(())
             }
         }]
     }
 }
 
-impl Dummy {
+impl SmolFS {
     /// Create new module instance
-    pub fn new(cfg: DummyConfig) -> Dummy {
-        Dummy { cfg }
+    pub fn new(cfg: SmolFSConfig) -> SmolFS {
+        SmolFS { cfg }
     }
 }
 
@@ -330,15 +329,15 @@ impl Dummy {
 pub const MODULE_KEY_DUMMY: u16 = 128;
 plugin_types_trait_impl!(
     MODULE_KEY_DUMMY,
-    DummyInput,
-    DummyOutput,
-    DummyOutputOutcome,
-    DummyOutputConfirmation,
-    DummyVerificationCache
+    SmolFSInput,
+    SmolFSOutput,
+    SmolFSOutputOutcome,
+    SmolFSOutputConfirmation,
+    SmolFSVerificationCache
 );
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error)]
-pub enum DummyError {
+pub enum SmolFSError {
     #[error("Something went wrong")]
     SomethingDummyWentWrong,
 }
