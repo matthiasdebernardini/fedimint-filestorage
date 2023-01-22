@@ -28,16 +28,16 @@ function await_bitcoin_rpc() {
     done
 }
 
-function await_cln_rpc() {
-    until [ -e "$FM_LN1_DIR/regtest/lightning-rpc" ]; do
-        >&2 echo "LN gateway 1 not ready yet. Waiting ..."
-        sleep "$POLL_INTERVAL"
-    done
-    until [ -e "$FM_LN2_DIR/regtest/lightning-rpc" ]; do
-        >&2 echo "LN gateway 2 not ready yet. Waiting ..."
-        sleep "$POLL_INTERVAL"
-    done
-}
+# function await_cln_rpc() {
+#     until [ -e "$FM_LN1_DIR/regtest/lightning-rpc" ]; do
+#         >&2 echo "LN gateway 1 not ready yet. Waiting ..."
+#         sleep "$POLL_INTERVAL"
+#     done
+#     until [ -e "$FM_LN2_DIR/regtest/lightning-rpc" ]; do
+#         >&2 echo "LN gateway 2 not ready yet. Waiting ..."
+#         sleep "$POLL_INTERVAL"
+#     done
+# }
 
 function await_fedimint_block_sync() {
   local node_height

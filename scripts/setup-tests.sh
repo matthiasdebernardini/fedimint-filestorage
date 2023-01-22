@@ -33,10 +33,10 @@ lightningd $LIGHTNING_FLAGS --network regtest --bitcoin-rpcuser=bitcoin --bitcoi
 echo $! >> $FM_PID_FILE
 lightningd $LIGHTNING_FLAGS --network regtest --bitcoin-rpcuser=bitcoin --bitcoin-rpcpassword=bitcoin --lightning-dir=$FM_LN2_DIR --addr=127.0.0.1:9001 &
 echo $! >> $FM_PID_FILE
-await_cln_rpc
+# await_cln_rpc
 
 # Initialize wallet and get ourselves some money
 mine_blocks 101
 
 # Open channel
-open_channel
+# open_channel
