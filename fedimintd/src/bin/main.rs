@@ -7,6 +7,7 @@ use fedimint_api::config::ModuleGenRegistry;
 use fedimint_api::db::Database;
 use fedimint_api::module::DynModuleGen;
 use fedimint_api::task::{sleep, TaskGroup};
+use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
 use fedimint_server::consensus::FedimintConsensus;
@@ -139,6 +140,7 @@ async fn run(opts: ServerOpts, mut task_group: TaskGroup) -> anyhow::Result<()> 
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
 
     info!("Starting pre-check");
