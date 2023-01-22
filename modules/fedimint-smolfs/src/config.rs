@@ -11,57 +11,57 @@ use serde::{Deserialize, Serialize};
 use crate::KIND;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DummyConfig {
-    /// Contains all configuration that will be encrypted such as private key material
-    pub private: DummyConfigPrivate,
+pub struct SmolFSConfig {
+    pub local: SmolFSConfigLocal,
     /// Contains all configuration that needs to be the same for every federation member
-    pub consensus: DummyConfigConsensus,
+    pub consensus: SmolFSConfigConsensus,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Encodable)]
-pub struct DummyConfigConsensus {
-    pub something: u64,
+pub struct SmolFSConfigConsensus {
+    pub merkle_root: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DummyConfigPrivate {
-    pub something_private: u64,
+pub struct SmolFSConfigLocal {
+    pub pubkey: String,
+    pub backup: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Encodable)]
-pub struct DummyClientConfig {
-    pub something: u64,
+pub struct SmolFSClientConfig {
+    pub merkle_root: Vec<u8>,
 }
 
-impl TypedClientModuleConfig for DummyClientConfig {
+impl TypedClientModuleConfig for SmolFSClientConfig {
     fn kind(&self) -> fedimint_api::core::ModuleKind {
         KIND
     }
 }
 
-impl TypedServerModuleConsensusConfig for DummyConfigConsensus {
+impl TypedServerModuleConsensusConfig for SmolFSConfigConsensus {
     fn to_client_config(&self) -> ClientModuleConfig {
         ClientModuleConfig::new(
             KIND,
-            serde_json::to_value(&DummyClientConfig {
-                something: self.something,
+            serde_json::to_value(&SmolFSClientConfig {
+                merkle_root: self.merkle_root.clone(),
             })
             .expect("Serialization can't fail"),
         )
     }
 }
 
-impl TypedServerModuleConfig for DummyConfig {
-    type Local = ();
-    type Private = DummyConfigPrivate;
-    type Consensus = DummyConfigConsensus;
+impl TypedServerModuleConfig for SmolFSConfig {
+    type Local = SmolFSConfigLocal;
+    type Private = ();
+    type Consensus = SmolFSConfigConsensus;
 
-    fn from_parts(_local: Self::Local, private: Self::Private, consensus: Self::Consensus) -> Self {
-        Self { private, consensus }
+    fn from_parts(local: Self::Local, _private: Self::Private, consensus: Self::Consensus) -> Self {
+        Self { local, consensus }
     }
 
     fn to_parts(self) -> (ModuleKind, Self::Local, Self::Private, Self::Consensus) {
-        (KIND, (), self.private, self.consensus)
+        (KIND, self.local, (), self.consensus)
     }
 
     fn validate_config(&self, _identity: &PeerId) -> anyhow::Result<()> {
