@@ -10,6 +10,7 @@ use fedimint_api::task::TaskGroup;
 use fedimint_api::Amount;
 use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
+use fedimint_smolfs::SmolFSConfigGenerator;
 use fedimint_wallet::WalletGen;
 use fedimintd::distributedgen::{create_cert, run_dkg};
 use fedimintd::encrypt::*;
@@ -135,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
 
     let mut task_group = TaskGroup::new();

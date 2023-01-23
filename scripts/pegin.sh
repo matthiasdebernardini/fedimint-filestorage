@@ -21,6 +21,10 @@ FED_ID="$(get_federation_id)"
 # get a peg-in address from either the gateway or the client
 if [ "$USE_GATEWAY" == 1 ]; then ADDR="$($FM_GATEWAY_CLI address "$FED_ID" | jq -e -r '.address')"; else ADDR="$($FM_MINT_CLIENT peg-in-address | jq -e -r '.address')"; fi
 # send bitcoin to that address and save the txid
+echo "addr"
+echo $ADDR 
+echo "peg in amount"
+echo $PEG_IN_AMOUNT
 TX_ID=$(send_bitcoin $ADDR $PEG_IN_AMOUNT)
 # wait for confirmation and wait for the fed to sync
 mine_blocks 11

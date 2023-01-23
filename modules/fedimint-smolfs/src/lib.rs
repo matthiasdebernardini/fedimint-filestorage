@@ -5,6 +5,7 @@ use std::fmt::{self};
 use async_trait::async_trait;
 use bitcoin::hashes::sha256;
 use common::SmolFSDecoder;
+use config::SmolFSClientConfig;
 use db::{ExampleKey, ExampleKeyPrefix};
 use fedimint_api::cancellable::Cancellable;
 use fedimint_api::config::{
@@ -155,7 +156,7 @@ impl ModuleGen for SmolFSConfigGenerator {
         config.to_typed::<SmolFSConfig>()?.validate_config(identity)
     }
     fn hash_client_module(&self, config: serde_json::Value) -> anyhow::Result<sha256::Hash> {
-        unimplemented!()
+        serde_json::from_value::<SmolFSClientConfig>(config)?.consensus_hash()
     }
 }
 

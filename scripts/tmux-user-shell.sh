@@ -23,8 +23,8 @@ scripts/pegin.sh 10000.0 | show_verbose_output
 # echo Connecting federation to gateway
 # gw_connect_fed
 
-echo Funding gateway e-cash wallet ...
-scripts/pegin.sh 20000.0 1 | show_verbose_output
+# echo Funding gateway e-cash wallet ...
+# scripts/pegin.sh 20000.0 1 | show_verbose_output
 
 echo Done!
 echo

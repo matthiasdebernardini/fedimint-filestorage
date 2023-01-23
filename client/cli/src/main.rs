@@ -22,6 +22,7 @@ use fedimint_core::config::load_from_file;
 use fedimint_core::modules::ln::common::LightningDecoder;
 use fedimint_core::modules::ln::contracts::ContractId;
 use fedimint_core::modules::ln::LightningGen;
+use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
 use fedimint_core::modules::wallet::WalletGen;
@@ -422,6 +423,7 @@ async fn main() {
             DynModuleGen::from(WalletGen),
             DynModuleGen::from(MintGen),
             DynModuleGen::from(LightningGen),
+            DynModuleGen::from(SmolFSConfigGenerator),
         ]);
 
         let client = Client::new(cfg.clone(), decoders, module_gens, db, Default::default()).await;

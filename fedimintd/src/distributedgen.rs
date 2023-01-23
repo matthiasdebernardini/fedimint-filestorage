@@ -12,6 +12,7 @@ use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
 use fedimint_server::config::{PeerServerParams, ServerConfig, ServerConfigParams};
 use fedimint_server::multiplexed::PeerConnectionMultiplexer;
+use fedimint_smolfs::SmolFSConfigGenerator;
 use fedimint_wallet::WalletGen;
 use itertools::Itertools;
 use rand::rngs::OsRng;
@@ -87,6 +88,7 @@ pub async fn run_dkg(
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
 
     let result = ServerConfig::distributed_gen(

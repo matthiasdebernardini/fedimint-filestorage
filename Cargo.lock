@@ -1301,6 +1301,7 @@ dependencies = [
  "fedimint-mint",
  "fedimint-rocksdb",
  "fedimint-server",
+ "fedimint-smolfs",
  "fedimint-wallet",
  "futures",
  "hbbft",

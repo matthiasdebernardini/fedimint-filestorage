@@ -115,9 +115,11 @@ function sat_to_btc() {
 
 #caller should call mine_blocks() after this
 function send_bitcoin() {
+    
     local RECV_ADDRESS
     RECV_ADDRESS=$1
     local SEND_AMT
+    
     SEND_AMT=$2
 
     local TX_ID

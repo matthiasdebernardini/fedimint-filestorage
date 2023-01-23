@@ -17,6 +17,7 @@ use fedimint_api::task::{timeout, Elapsed, TaskGroup};
 use fedimint_api::{Amount, PeerId};
 pub use fedimint_core::config::*;
 use fedimint_core::modules::mint::MintGenParams;
+use fedimint_core::modules::smolfs::SmolFSConfigGenParams;
 use fedimint_wallet::WalletGenParams;
 use hbbft::crypto::serde_impl::SerdeSecret;
 use hbbft::NetworkInfo;
@@ -657,6 +658,9 @@ impl ServerConfigParams {
                 })
                 .attach(MintGenParams {
                     mint_amounts: ServerConfigParams::gen_denominations(max_denomination),
+                })
+                .attach(SmolFSConfigGenParams {
+                    important_param: 42,
                 }),
         }
     }

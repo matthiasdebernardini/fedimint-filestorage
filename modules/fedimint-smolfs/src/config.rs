@@ -10,19 +10,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::KIND;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable)]
 pub struct SmolFSConfig {
     pub local: SmolFSConfigLocal,
     /// Contains all configuration that needs to be the same for every federation member
     pub consensus: SmolFSConfigConsensus,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Encodable)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable)]
 pub struct SmolFSConfigConsensus {
     pub merkle_root: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable)]
 pub struct SmolFSConfigLocal {
     pub pubkey: String,
     pub backup: String,
