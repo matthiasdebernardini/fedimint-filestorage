@@ -79,7 +79,7 @@ impl ModuleGen for SmolFSConfigGenerator {
         _env: &BTreeMap<OsString, OsString>,
         _task_group: &mut TaskGroup,
     ) -> anyhow::Result<DynServerModule> {
-        info!("init");
+        info!("module gen init");
         Ok(SmolFS::new(cfg.to_typed()?).into())
     }
 
@@ -97,11 +97,11 @@ impl ModuleGen for SmolFSConfigGenerator {
             .map(|&peer| {
                 let config = SmolFSConfig {
                     local: SmolFSConfigLocal {
-                        pubkey: String::new(),
+                        pubkey: String::from("trusted dealer gen"),
                         backup: String::new(),
                     },
                     consensus: SmolFSConfigConsensus {
-                        merkle_root: vec![],
+                        merkle_root: vec![4 as u8, 2 as u8],
                     },
                 };
                 (peer, config)
@@ -129,7 +129,7 @@ impl ModuleGen for SmolFSConfigGenerator {
 
         let server = SmolFSConfig {
             local: SmolFSConfigLocal {
-                pubkey: String::new(),
+                pubkey: String::from("distributed gen"),
                 backup: String::new(),
             },
             consensus: SmolFSConfigConsensus {
@@ -234,17 +234,29 @@ impl ServerModule for SmolFS {
         dbtx: &mut DatabaseTransaction<'_>,
     ) -> Vec<Self::ConsensusItem> {
         info!("consensus proposal");
-        dbtx.find_by_prefix(&ExampleKeyPrefix)
+        let pubkey = self.cfg.local.pubkey.clone();
+        let backup = self.cfg.local.backup.clone();
+        info!("pubkey {pubkey} backup {backup}");
+        let dbvec: Vec<Self::ConsensusItem> = dbtx
+            .find_by_prefix(&ExampleKeyPrefix)
             .await
             .map(|res| {
                 let res = res.expect("DB Error");
                 SmolFSOutputConfirmation(SmolFSEntry {
-                    pubkey: res.0 .0,
-                    backup: res.1,
+                    // pubkey: res.0 .0,
+                    // backup: res.1,
+                    pubkey: String::from("npubTEST"),
+                    backup: String::from("backupTEST"),
                 })
             })
             // .chain(std::iter::once(round_ci))
-            .collect()
+            .collect();
+        println!("dbvec {dbvec:?}");
+        // dbvec
+        vec![SmolFSOutputConfirmation(SmolFSEntry {
+            pubkey: String::from("npubTEST"),
+            backup: String::from("backupTEST"),
+        })]
     }
 
     async fn begin_consensus_epoch<'a, 'b>(
@@ -255,13 +267,17 @@ impl ServerModule for SmolFS {
         info!("begin consensus epoch");
         let pubkey = self.cfg.local.pubkey.clone();
         let backup = self.cfg.local.backup.clone();
-        let a = dbtx
-            .insert_entry(&ExampleKey(pubkey), &backup)
-            .await
-            .expect("DB Error")
-            .unwrap();
-        println!("{self:?}");
-        println!("{:?}", a);
+        let mut b = String::new();
+        dbtx.insert_entry(
+            &ExampleKey("inserting entry".to_string()),
+            &"inserting backup".to_string(),
+        )
+        .await
+        .expect("DB Error")
+        .map(|a| b = a);
+        // .unwrap();
+        println!("printing self {self:?}");
+        println!("{:?}", b);
     }
 
     fn build_verification_cache<'a>(
@@ -320,6 +336,7 @@ impl ServerModule for SmolFS {
         let key = ExampleKey(pubkey);
         let value = backup;
         dbtx.insert_new_entry(&key, &value).await.expect("DB Error");
+
         Ok(meta)
     }
 

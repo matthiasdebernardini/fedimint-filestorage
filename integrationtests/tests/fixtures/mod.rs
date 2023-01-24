@@ -44,6 +44,7 @@ use fedimint_server::config::ServerConfigParams;
 use fedimint_server::config::{connect, ServerConfig};
 use fedimint_server::consensus::{ConsensusProposal, HbbftConsensusOutcome};
 use fedimint_server::consensus::{FedimintConsensus, TransactionSubmissionError};
+use fedimint_server::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_server::multiplexed::PeerConnectionMultiplexer;
 use fedimint_server::net::connect::mock::MockNetwork;
 use fedimint_server::net::connect::{Connector, TlsTcpConnector};
@@ -177,6 +178,7 @@ pub async fn fixtures(num_peers: u16) -> anyhow::Result<Fixtures> {
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
 
     let decoders = module_decode_stubs();
@@ -664,6 +666,13 @@ struct ServerTest {
 
 /// Represents a collection of fedimint peer servers
 impl FederationTest {
+    pub fn get_db_contents(&self) -> () {
+        let a = self.servers.clone().pop().unwrap();
+        let b = a.to_owned().clone();
+        let b = &b.borrow_mut().database;
+        println!("database {b:?}");
+        assert_eq!(true, true);
+    }
     /// Returns the outcome of the last consensus epoch
     pub fn last_consensus(&self) -> HbbftConsensusOutcome {
         self.last_consensus.borrow().clone()

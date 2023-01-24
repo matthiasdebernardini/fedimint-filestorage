@@ -22,7 +22,7 @@ use fedimint_core::config::load_from_file;
 use fedimint_core::modules::ln::common::LightningDecoder;
 use fedimint_core::modules::ln::contracts::ContractId;
 use fedimint_core::modules::ln::LightningGen;
-use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
+use fedimint_core::modules::smolfs::{SmolFSConfigGenerator, SmolFSEntry, SmolFSInput};
 use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
 use fedimint_core::modules::wallet::WalletGen;
@@ -40,12 +40,16 @@ use mint_client::utils::{
 use mint_client::{module_decode_stubs, Client, UserClientConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Serialize)]
 #[serde(rename_all(serialize = "snake_case"))]
 #[serde(untagged)]
 enum CliOutput {
+    SmolFS {
+        success: bool,
+    },
     VersionHash {
         hash: String,
     },
@@ -213,6 +217,10 @@ enum CommandNoWorkdir {
 }
 #[derive(Subcommand)]
 enum Command {
+    Smolfs {
+        pubkey: String,
+        backup: String,
+    },
     /// Print the latest git commit hash this bin. was build with
     VersionHash,
     /// Generate a new peg-in address, funds sent to it can later be claimed
@@ -260,7 +268,9 @@ enum Command {
     },
 
     /// Pay a lightning invoice via a gateway
-    LnPay { bolt11: lightning_invoice::Invoice },
+    LnPay {
+        bolt11: lightning_invoice::Invoice,
+    },
 
     /// Fetch (re-)issued notes and finalize issuance process
     Fetch,
@@ -277,16 +287,22 @@ enum Command {
     },
 
     /// Wait for incoming invoice to be paid
-    WaitInvoice { invoice: lightning_invoice::Invoice },
+    WaitInvoice {
+        invoice: lightning_invoice::Invoice,
+    },
 
     /// Wait for the fed to reach a consensus block height
-    WaitBlockHeight { height: u64 },
+    WaitBlockHeight {
+        height: u64,
+    },
 
     /// Config enabling client to establish websocket connection to federation
     ConnectInfo,
 
     /// Join a federation using it's ConnectInfo
-    JoinFederation { connect: String },
+    JoinFederation {
+        connect: String,
+    },
 
     /// List registered gateways
     ListGateways,
@@ -449,6 +465,12 @@ async fn handle_command(
 ) -> CliResult {
     let mut task_group = TaskGroup::new();
     match cli.command {
+        Command::Smolfs { pubkey, backup } => {
+            let _a = SmolFSInput(Box::new(SmolFSEntry { pubkey, backup }));
+            info!("smolfs working");
+
+            Ok(CliOutput::SmolFS { success: true })
+        }
         Command::Api { method, arg } => {
             let arg: Value = serde_json::from_str(&arg).unwrap();
             let ws_api: Arc<_> = WsFederationApi::from_config(client.config().as_ref()).into();

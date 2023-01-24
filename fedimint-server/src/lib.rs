@@ -186,6 +186,7 @@ impl FedimintServer {
         self.start_consensus().await;
 
         while !task_handle.is_shutting_down() {
+            info!("while !task_handle.is_shutting_down()");
             let outcomes = if let Ok(v) = self
                 .run_consensus_epoch(consensus.get_consensus_proposal(), &mut rng)
                 .await

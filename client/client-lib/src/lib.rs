@@ -243,6 +243,20 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
         }
     }
 
+    pub fn smolfs_client(&self) -> WalletClient {
+        todo!();
+        // WalletClient {
+        //     config: self
+        //         .config
+        //         .as_ref()
+        //         .get_first_module_by_kind::<WalletClientConfig>("wallet")
+        //         .expect("needs wallet module client config")
+        //         .1,
+
+        //     context: self.context.clone(),
+        // }
+    }
+
     pub fn config(&self) -> T {
         self.config.clone()
     }

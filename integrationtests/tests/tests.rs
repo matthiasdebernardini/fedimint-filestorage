@@ -7,7 +7,7 @@ use assert_matches::assert_matches;
 use bitcoin::{Amount, KeyPair};
 use fedimint_api::cancellable::Cancellable;
 use fedimint_api::core::{
-    LEGACY_HARDCODED_INSTANCE_ID_LN, LEGACY_HARDCODED_INSTANCE_ID_MINT,
+    ModuleKind, LEGACY_HARDCODED_INSTANCE_ID_LN, LEGACY_HARDCODED_INSTANCE_ID_MINT,
     LEGACY_HARDCODED_INSTANCE_ID_WALLET,
 };
 use fedimint_api::task::TaskGroup;
@@ -17,6 +17,7 @@ use fedimint_ln::LightningConsensusItem;
 use fedimint_mint::{MintConsensusItem, MintOutputSignatureShare};
 use fedimint_server::consensus::TransactionSubmissionError::TransactionError;
 use fedimint_server::epoch::ConsensusItem;
+use fedimint_server::modules::smolfs::{SmolFS, SmolFSEntry, SmolFSOutputConfirmation};
 use fedimint_server::transaction::legacy::Output;
 use fedimint_server::transaction::TransactionError::UnbalancedTransaction;
 use fedimint_wallet::PegOutSignatureItem;
@@ -28,8 +29,42 @@ use mint_client::transaction::TransactionBuilder;
 use mint_client::ClientError;
 use threshold_crypto::{SecretKey, SecretKeyShare};
 use tracing::debug;
+use tracing::log::info;
 
 use crate::fixtures::{assert_ci, peers, test, FederationTest};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn make_backup() -> Result<()> {
+    test(4, |fed, _, _, _, _| async move {
+        let entry = SmolFSEntry {
+            pubkey: String::from("npubA3e"),
+            backup: String::from("42"),
+        };
+        let ci = SmolFSOutputConfirmation(entry);
+        let a = fed
+            .cfg
+            .get_module_config(3)
+            .unwrap()
+            .local
+            .is_kind(&ModuleKind::from_static_str("smolfs"));
+        let a = fed.cfg.get_module_config(3).unwrap().local;
+        let backup = a.value().as_object().unwrap().get("backup").unwrap();
+        let pubkey = a.value().as_object().unwrap().get("pubkey").unwrap();
+        // info!("{a:?}");
+        info!("backup {backup:?}");
+        info!("pubkey {pubkey:?}");
+        let ci_vec = vec![ConsensusItem::Module(
+            fedimint_api::core::DynModuleConsensusItem::from_typed(3, ci),
+        )];
+
+        fed.get_db_contents();
+        fed.run_consensus_epochs(1).await;
+        fed.subset_peers(&[1]).override_proposal(ci_vec);
+        fed.run_consensus_epochs(1).await;
+        fed.get_db_contents();
+    })
+    .await
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn peg_in_and_peg_out_with_fees() -> Result<()> {

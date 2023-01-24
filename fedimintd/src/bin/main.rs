@@ -205,6 +205,7 @@ async fn run(opts: ServerOpts, mut task_group: TaskGroup) -> anyhow::Result<()> 
     let consensus = FedimintConsensus::new(cfg.clone(), db, module_inits, &mut task_group).await?;
 
     FedimintServer::run(cfg, consensus, decoders, &mut task_group).await?;
+    info!("<fedimint run is over>");
 
     Ok(())
 }
