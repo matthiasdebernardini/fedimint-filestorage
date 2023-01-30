@@ -5,14 +5,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bitcoin::util::taproot::NodeInfo;
 use fedimint_api::config::{ClientModuleConfig, ConfigGenParams, ServerModuleConfig};
 use fedimint_api::core::{ModuleInstanceId, LEGACY_HARDCODED_INSTANCE_ID_WALLET};
 use fedimint_api::db::mem_impl::MemDatabase;
-use fedimint_api::db::{Database, DatabaseTransaction};
+use fedimint_api::db::{Database, DatabaseTransaction, DatabaseValue, SerializableDatabaseValue};
 use fedimint_api::module::interconnect::ModuleInterconect;
-use fedimint_api::module::registry::ModuleDecoderRegistry;
+use fedimint_api::module::registry::{ModuleDecoderRegistry, ModuleRegistry};
 use fedimint_api::module::{ApiError, InputMeta, ModuleError, ModuleGen, TransactionItemAmount};
 use fedimint_api::{OutPoint, PeerId, ServerModule};
+use fedimint_smolfs::db::FinishedSmolFSEntry;
+use fedimint_smolfs::SmolFSOutputOutcome;
 
 pub mod btc;
 
@@ -213,6 +216,55 @@ where
             );
         }
         assert_all_equal(results.into_iter())
+    }
+
+    pub async fn generate_fake_smolfs_entry(&mut self, outpoint: OutPoint) {
+        for (_, _, db, module_instance_id) in &mut self.members {
+            let mut dbtx = db.begin_transaction().await;
+            // let data = &outpoint.txid.to_bytes()[..];
+            // let modules = ModuleRegistry::default();
+            // let modules = ModuleRegistry::default()
+            // .get(3)
+            // .unwrap();
+            // let modules =ModuleDecoderRegistry::default().get(3)
+            // let txid = bitcoin::Txid::from_bytes(
+            // data,
+            // &modules
+            // ).unwrap();
+            let txid = outpoint.txid;
+
+            {
+                let mut module_dbtx = dbtx.with_module_prefix(*module_instance_id);
+                module_dbtx
+                    .insert_entry(
+                        &fedimint_smolfs::db::ExampleKey("npubTest".to_string()),
+                        &"npubBackup".to_string(),
+                    )
+                    .await
+                    .unwrap();
+                module_dbtx
+                    .insert_entry(&FinishedSmolFSEntry(outpoint), &SmolFSOutputOutcome(txid))
+                    .await
+                    .unwrap();
+            }
+            println!("generating fake smolfs entry");
+
+            dbtx.commit_tx().await.expect("DB Error");
+        }
+    }
+
+    pub async fn get_fake_smolfs_entry(&mut self) {
+        for (a, b, db, module_instance_id) in &mut self.members {
+            let mut dbtx = db.begin_transaction().await;
+            {
+                let mut module_dbtx = dbtx.with_module_prefix(*module_instance_id);
+                let a = module_dbtx
+                    .get_value(&fedimint_smolfs::db::ExampleKey("npubTest".to_string()))
+                    .await
+                    .unwrap();
+                println!("smolfs entry {a:?}");
+            }
+        }
     }
 
     pub async fn generate_fake_utxo(&mut self) {

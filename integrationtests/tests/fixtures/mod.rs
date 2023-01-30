@@ -44,12 +44,14 @@ use fedimint_server::config::ServerConfigParams;
 use fedimint_server::config::{connect, ServerConfig};
 use fedimint_server::consensus::{ConsensusProposal, HbbftConsensusOutcome};
 use fedimint_server::consensus::{FedimintConsensus, TransactionSubmissionError};
+use fedimint_server::modules::smolfs::db::{ExampleKey, ExampleKeyPrefix};
 use fedimint_server::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_server::multiplexed::PeerConnectionMultiplexer;
 use fedimint_server::net::connect::mock::MockNetwork;
 use fedimint_server::net::connect::{Connector, TlsTcpConnector};
 use fedimint_server::net::peers::PeerConnector;
 use fedimint_server::{consensus, EpochMessage, FedimintServer};
+use fedimint_smolfs::*;
 use fedimint_testing::btc::{fixtures::FakeBitcoinTest, BitcoinTest};
 use fedimint_wallet::config::WalletConfig;
 use fedimint_wallet::db::UTXOKey;
@@ -666,13 +668,28 @@ struct ServerTest {
 
 /// Represents a collection of fedimint peer servers
 impl FederationTest {
-    pub fn get_db_contents(&self) -> () {
-        let a = self.servers.clone().pop().unwrap();
-        let b = a.to_owned().clone();
-        let b = &b.borrow_mut().database;
-        println!("database {b:?}");
-        assert_eq!(true, true);
-    }
+    // pub async fn get_db_contents(&self) -> () {
+    //     let a = self.servers.clone().pop().unwrap();
+    //     let b = &a.borrow_mut().database;
+    //     println!("database {b:?}");
+
+    //     let a = b
+    //         .begin_transaction()
+    //         .await
+    //         // .find_by_prefix(&ExampleKeyPrefix)
+    //         // npubA3e
+    //         // npubTEST
+    //     .get_value(&ExampleKey("npubTEST".to_string())).await.ok().flatten();
+
+    //         // .await
+    //         // .flat_map(|a| a.map(|b| b))
+    //         // .collect::<Vec<(ExampleKey, String)>>();
+    //     // .get_value(&ExampleKey("trusted dealer gen".to_string())).await.ok().flatten();
+    //     // info!(a);
+    //     println!("db content for consensus item {a:?}");
+
+    //     assert_eq!(true, true);
+    // }
     /// Returns the outcome of the last consensus epoch
     pub fn last_consensus(&self) -> HbbftConsensusOutcome {
         self.last_consensus.borrow().clone()
@@ -691,6 +708,7 @@ impl FederationTest {
     /// Sends a custom proposal, ignoring whatever is in FedimintConsensus
     /// Useful for simulating malicious federation nodes
     pub fn override_proposal(&self, items: Vec<ConsensusItem>) {
+        info!("override proposal");
         for server in &self.servers {
             let mut epoch_sig =
                 block_on(server.borrow().fedimint.consensus.get_consensus_proposal())
@@ -706,8 +724,10 @@ impl FederationTest {
                 items,
                 drop_peers: vec![],
             };
+            info!("{proposal:?}");
 
             server.borrow_mut().override_proposal = Some(proposal.clone());
+            info!("{:?}", server.borrow().override_proposal);
         }
     }
 
@@ -860,6 +880,60 @@ impl FederationTest {
         }
         true
     }
+    pub async fn backups_for_everyone(&self, pubkey: &str, backup: &str) -> bool {
+        info!("backups for everyone");
+        let bytes: [u8; 32] = rand::random();
+        let out_point = OutPoint {
+            txid: fedimint_api::TransactionId::from_inner(bytes),
+            out_idx: 0,
+        };
+
+        for server in &self.servers {
+            let transaction = fedimint_server::transaction::Transaction {
+                inputs: vec![],
+                outputs: vec![core::DynOutput::from_typed(
+                    3,
+                    SmolFSOutput(Box::new(SmolFSEntry {
+                        pubkey: String::from(pubkey),
+                        backup: String::from(backup),
+                    })),
+                )],
+                signature: None,
+            };
+            let svr = server.borrow_mut();
+            let mut dbtx = svr.database.begin_transaction().await;
+            dbtx.insert_entry(
+                &fedimint_server::db::AcceptedTransactionKey(out_point.txid),
+                &fedimint_server::consensus::AcceptedTransaction {
+                    epoch: 1,
+                    transaction: transaction.clone(),
+                },
+            )
+            .await
+            .expect("DB Error");
+            svr.fedimint
+                .consensus
+                .modules
+                .get_expect(3)
+                .apply_output(
+                    &mut dbtx.with_module_prefix(LEGACY_HARDCODED_INSTANCE_ID_MINT),
+                    &core::DynOutput::from_typed(
+                        3,
+                        SmolFSOutput(Box::new(SmolFSEntry {
+                            pubkey: String::from(pubkey),
+                            backup: String::from(backup),
+                        })),
+                    ),
+                    out_point,
+                )
+                .await
+                .unwrap();
+
+            dbtx.commit_tx().await.expect("DB Error");
+            // self.override_proposal(vec![ConsensusItem::Transaction(transaction.clone())]);
+        }
+        true
+    }
 
     /// Inserts coins directly into the databases of federation nodes
     pub async fn database_add_coins_for_user<C: AsRef<ClientConfig> + Clone>(
@@ -937,11 +1011,12 @@ impl FederationTest {
     /// If the epoch has empty proposals (no new information) then panic
     pub async fn run_consensus_epochs(&self, epochs: usize) {
         for _ in 0..(epochs) {
-            if self
-                .servers
-                .iter()
-                .all(|s| Self::empty_proposal(&s.borrow().fedimint))
-            {
+            if self.servers.iter().all(|s| {
+                let st = &s.borrow().database.clone();
+                // let st = st.to_owned().begin_transaction().into();
+                println!("run consensus epochs{:?}", st);
+                Self::empty_proposal(&s.borrow().fedimint)
+            }) {
                 panic!("Empty proposals, fed might wait forever");
             }
 
@@ -986,7 +1061,9 @@ impl FederationTest {
             match item {
                 // ignore items that get automatically generated
                 ConsensusItem::Module(mci) => {
+                    // if (mci.module_instance_id() != LEGACY_HARDCODED_INSTANCE_ID_WALLET) | (mci.module_instance_id() != 3) {
                     if mci.module_instance_id() != LEGACY_HARDCODED_INSTANCE_ID_WALLET {
+                        info!("if mci.module_instance_id() != LEGACY_HARDCODED_INSTANCE_ID_WALLET && mci.module_instance_id() != 3 ");
                         return false;
                     }
 

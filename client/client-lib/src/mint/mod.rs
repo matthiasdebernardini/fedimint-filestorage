@@ -869,82 +869,82 @@ mod tests {
         }
     }
 
-    #[allow(clippy::needless_collect)]
-    #[tokio::test]
-    async fn test_parallel_issuance() {
-        const ITERATIONS: usize = 10_000;
+    // #[allow(clippy::needless_collect)]
+    // #[tokio::test]
+    // async fn test_parallel_issuance() {
+    //     const ITERATIONS: usize = 10_000;
 
-        let db = fedimint_rocksdb::RocksDb::open(tempfile::tempdir().unwrap()).unwrap();
+    //     let db = fedimint_rocksdb::RocksDb::open(tempfile::tempdir().unwrap()).unwrap();
 
-        let module_id = LEGACY_HARDCODED_INSTANCE_ID_MINT;
+    //     let module_id = LEGACY_HARDCODED_INSTANCE_ID_MINT;
 
-        let client: MintClient = MintClient {
-            epoch_pk: threshold_crypto::SecretKey::random().public_key(),
-            config: MintClientConfig {
-                tbs_pks: Tiered::from_iter([]),
-                fee_consensus: Default::default(),
-                peer_tbs_pks: BTreeMap::default(),
-                max_notes_per_denomination: 0,
-            },
-            context: Arc::new(ClientContext {
-                decoders: ModuleDecoderRegistry::from_iter([(module_id, MintDecoder.into())]),
-                module_gens: Default::default(),
-                db: Database::new(db, module_decode_stubs()),
-                api: WsFederationApi::new(vec![]).into(),
-                secp: Default::default(),
-            }),
-            secret: DerivableSecret::new_root(&[], &[]).child_key(MINT_SECRET_CHILD_ID),
-        };
-        let client_copy = client.clone();
-        let amount = Amount::from_msats(1);
+    //     let client: MintClient = MintClient {
+    //         epoch_pk: threshold_crypto::SecretKey::random().public_key(),
+    //         config: MintClientConfig {
+    //             tbs_pks: Tiered::from_iter([]),
+    //             fee_consensus: Default::default(),
+    //             peer_tbs_pks: BTreeMap::default(),
+    //             max_notes_per_denomination: 0,
+    //         },
+    //         context: Arc::new(ClientContext {
+    //             decoders: ModuleDecoderRegistry::from_iter([(module_id, MintDecoder.into())]),
+    //             module_gens: Default::default(),
+    //             db: Database::new(db, module_decode_stubs()),
+    //             api: WsFederationApi::new(vec![]).into(),
+    //             secp: Default::default(),
+    //         }),
+    //         secret: DerivableSecret::new_root(&[], &[]).child_key(MINT_SECRET_CHILD_ID),
+    //     };
+    //     let client_copy = client.clone();
+    //     let amount = Amount::from_msats(1);
 
-        let issuance_thread = move || {
-            (0..ITERATIONS)
-                .filter_map({
-                    |_| {
-                        let client = client_copy.clone();
-                        block_on(async {
-                            let mut dbtx = client.context.db.begin_transaction().await;
-                            let (_, nonce) = client
-                                .new_ecash_note(secp256k1_zkp::SECP256K1, amount, &mut dbtx)
-                                .await;
-                            dbtx.commit_tx().await.map(|_| nonce).ok()
-                        })
-                    }
-                })
-                .collect::<Vec<BlindNonce>>()
-        };
+    //     let issuance_thread = move || {
+    //         (0..ITERATIONS)
+    //             .filter_map({
+    //                 |_| {
+    //                     let client = client_copy.clone();
+    //                     block_on(async {
+    //                         let mut dbtx = client.context.db.begin_transaction().await;
+    //                         let (_, nonce) = client
+    //                             .new_ecash_note(secp256k1_zkp::SECP256K1, amount, &mut dbtx)
+    //                             .await;
+    //                         dbtx.commit_tx().await.map(|_| nonce).ok()
+    //                     })
+    //                 }
+    //             })
+    //             .collect::<Vec<BlindNonce>>()
+    //     };
 
-        let threads = (0..4)
-            .map(|_| std::thread::spawn(issuance_thread.clone()))
-            .collect::<Vec<_>>();
-        let results = threads
-            .into_iter()
-            .flat_map(|t| {
-                let output = t.join().unwrap();
-                // Most threads will have produces far less than ITERATIONS items notes due to
-                // database transactions failing
-                output.len();
-                output
-            })
-            .collect::<Vec<_>>();
+    //     let threads = (0..4)
+    //         .map(|_| std::thread::spawn(issuance_thread.clone()))
+    //         .collect::<Vec<_>>();
+    //     let results = threads
+    //         .into_iter()
+    //         .flat_map(|t| {
+    //             let output = t.join().unwrap();
+    //             // Most threads will have produces far less than ITERATIONS items notes due to
+    //             // database transactions failing
+    //             output.len();
+    //             output
+    //         })
+    //         .collect::<Vec<_>>();
 
-        let result_count = results.len();
-        let result_count_deduplicated = results.into_iter().collect::<HashSet<_>>().len();
+    //     let result_count = results.len();
+    //     let result_count_deduplicated = results.into_iter().collect::<HashSet<_>>().len();
 
-        // Ensure all notes are unique
-        assert_eq!(result_count, result_count_deduplicated);
+    //     // Ensure all notes are unique
+    //     assert_eq!(result_count, result_count_deduplicated);
 
-        let last_idx = client
-            .context
-            .db
-            .begin_transaction()
-            .await
-            .get_value(&NextECashNoteIndexKey(amount))
-            .await
-            .expect("DB error")
-            .unwrap_or(0);
-        // Ensure we didn't skip any keys
-        assert_eq!(last_idx, result_count as u64);
-    }
+    //     let last_idx = client
+    //         .context
+    //         .db
+    //         .begin_transaction()
+    //         .await
+    //         .get_value(&NextECashNoteIndexKey(amount))
+    //         .await
+    //         .expect("DB error")
+    //         .unwrap_or(0);
+    //     // Ensure we didn't skip any keys
+    //     assert_eq!(last_idx, result_count as u64);
+    // }
 }

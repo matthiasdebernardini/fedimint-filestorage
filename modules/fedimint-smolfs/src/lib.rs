@@ -4,16 +4,17 @@ use std::fmt::{self};
 
 use async_trait::async_trait;
 use bitcoin::hashes::sha256;
+use bitcoin::Txid;
 use common::SmolFSDecoder;
 use config::SmolFSClientConfig;
-use db::{ExampleKey, ExampleKeyPrefix};
+use db::{ExampleKey, ExampleKeyPrefix, FinishedSmolFSEntry};
 use fedimint_api::cancellable::Cancellable;
 use fedimint_api::config::{
     ConfigGenParams, DkgPeerMsg, ModuleGenParams, ServerModuleConfig, TypedServerModuleConfig,
 };
 use fedimint_api::config::{ModuleConfigResponse, TypedServerModuleConsensusConfig};
-use fedimint_api::core::{ModuleInstanceId, ModuleKind};
-use fedimint_api::db::{Database, DatabaseTransaction};
+use fedimint_api::core::{ModuleInstanceId, ModuleKind, OutputOutcome};
+use fedimint_api::db::{Database, DatabaseTransaction, SerializableDatabaseValue};
 use fedimint_api::encoding::{Decodable, Encodable};
 use fedimint_api::module::__reexports::serde_json;
 use fedimint_api::module::audit::Audit;
@@ -24,7 +25,9 @@ use fedimint_api::module::{
 use fedimint_api::net::peers::MuxPeerConnections;
 use fedimint_api::server::DynServerModule;
 use fedimint_api::task::TaskGroup;
-use fedimint_api::{plugin_types_trait_impl, OutPoint, PeerId, ServerModule};
+use fedimint_api::{
+    plugin_types_trait_impl, BitcoinHash, OutPoint, PeerId, ServerModule, TransactionId,
+};
 use impl_tools::autoimpl;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -80,7 +83,7 @@ impl ModuleGen for SmolFSConfigGenerator {
         _task_group: &mut TaskGroup,
     ) -> anyhow::Result<DynServerModule> {
         info!("module gen init");
-        Ok(SmolFS::new(cfg.to_typed()?).into())
+        Ok(SmolFS::new(cfg.to_typed()?).await.into())
     }
 
     fn trusted_dealer_gen(
@@ -185,7 +188,7 @@ impl fmt::Display for SmolFSInput {
 #[derive(
     Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable, Default,
 )]
-pub struct SmolFSOutput();
+pub struct SmolFSOutput(pub Box<SmolFSEntry>);
 
 impl fmt::Display for SmolFSOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -193,7 +196,7 @@ impl fmt::Display for SmolFSOutput {
     }
 }
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub struct SmolFSOutputOutcome;
+pub struct SmolFSOutputOutcome(pub TransactionId);
 
 impl fmt::Display for SmolFSOutputOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -242,21 +245,26 @@ impl ServerModule for SmolFS {
             .await
             .map(|res| {
                 let res = res.expect("DB Error");
+                let a = res.0 .0.clone();
+                let b = res.1.clone();
+                println!("pubkey: {a}");
+                println!("backup: in consensus {b}");
                 SmolFSOutputConfirmation(SmolFSEntry {
-                    // pubkey: res.0 .0,
-                    // backup: res.1,
-                    pubkey: String::from("npubTEST"),
-                    backup: String::from("backupTEST"),
+                    pubkey: res.0 .0,
+                    backup: res.1,
+                    // pubkey: String::from("npubTEST"),
+                    // backup: String::from("backupTEST"),
                 })
             })
             // .chain(std::iter::once(round_ci))
             .collect();
         println!("dbvec {dbvec:?}");
-        // dbvec
-        vec![SmolFSOutputConfirmation(SmolFSEntry {
-            pubkey: String::from("npubTEST"),
-            backup: String::from("backupTEST"),
-        })]
+        dbvec
+
+        // vec![SmolFSOutputConfirmation(SmolFSEntry {
+        // pubkey: String::from("npubTEST"),
+        // backup: String::from("backupTEST"),
+        // })]
     }
 
     async fn begin_consensus_epoch<'a, 'b>(
@@ -265,19 +273,20 @@ impl ServerModule for SmolFS {
         _consensus_items: Vec<(PeerId, Self::ConsensusItem)>,
     ) {
         info!("begin consensus epoch");
-        let pubkey = self.cfg.local.pubkey.clone();
-        let backup = self.cfg.local.backup.clone();
-        let mut b = String::new();
-        dbtx.insert_entry(
-            &ExampleKey("inserting entry".to_string()),
-            &"inserting backup".to_string(),
-        )
-        .await
-        .expect("DB Error")
-        .map(|a| b = a);
+        // let pubkey = self.cfg.local.pubkey.clone();
+        // let backup = self.cfg.local.backup.clone();
+        // let mut b = String::new();
+        // dbtx.insert_entry(
+        //     &ExampleKey("inserting entry".to_string()),
+        //     &"inserting backup".to_string(),
+        // )
+        // .await
+        // .expect("DB Error")
+        // // .map(|a| b = a);
         // .unwrap();
+        // // dbtx.commit_tx().await.expect("msg");
         println!("printing self {self:?}");
-        println!("{:?}", b);
+        // println!("{:?}", b);
     }
 
     fn build_verification_cache<'a>(
@@ -286,17 +295,27 @@ impl ServerModule for SmolFS {
     ) -> Self::VerificationCache {
         info!("build verification");
 
-        // why not
-        let valid_users = inputs
-            .flat_map(|inputs| {
-                let mut h = HashMap::new();
-                h.entry(inputs.pubkey.clone())
-                    .or_insert(inputs.backup.clone());
-                h
-            })
-            .collect();
+        inputs.for_each(|inputs| {
+            // h.entry(inputs.pubkey.clone())
+            //     .or_insert(inputs.backup.clone());
+            // h
 
-        SmolFSVerificationCache { valid_users }
+            let pk = inputs.pubkey.clone();
+            let bc = inputs.backup.clone();
+            info!("build verification cache pubkey {pk:?}");
+            info!("build verification cache backup {bc:?}");
+        });
+        // let pk = inputs.last().unwrap().pubkey.clone();
+        // let bc = &inputs.last().unwrap().backup.clone();
+        // info!("pubkey {pk:?}");
+        // info!("backup {bc:?}");
+
+        let mut h = HashMap::new();
+        h.entry("hello".to_string()).or_insert("there".to_string());
+        // let valid_users = vec![h];
+
+        // SmolFSVerificationCache { valid_users }
+        SmolFSVerificationCache { valid_users: h }
     }
 
     async fn validate_input<'a, 'b>(
@@ -350,11 +369,19 @@ impl ServerModule for SmolFS {
 
     async fn apply_output<'a, 'b>(
         &'a self,
-        _dbtx: &mut DatabaseTransaction<'b>,
-        _output: &'a Self::Output,
+        dbtx: &mut DatabaseTransaction<'b>,
+        output: &'a Self::Output,
         _out_point: OutPoint,
     ) -> Result<TransactionItemAmount, ModuleError> {
-        unimplemented!()
+        let pubkey = output.0.pubkey.clone();
+        let backup = output.0.backup.clone();
+        let key = ExampleKey(pubkey);
+        let value = backup;
+        dbtx.insert_new_entry(&key, &value).await.expect("DB Error");
+        Ok(TransactionItemAmount {
+            amount: fedimint_api::Amount { msats: 0 },
+            fee: fedimint_api::Amount { msats: 0 },
+        })
     }
 
     async fn end_consensus_epoch<'a, 'b>(
@@ -367,28 +394,85 @@ impl ServerModule for SmolFS {
 
     async fn output_status(
         &self,
-        _dbtx: &mut DatabaseTransaction<'_>,
-        _out_point: OutPoint,
+        dbtx: &mut DatabaseTransaction<'_>,
+        outpoint: OutPoint,
     ) -> Option<Self::OutputOutcome> {
-        None
+        dbtx.get_value(&FinishedSmolFSEntry(outpoint))
+            .await
+            .expect("DB error")
     }
 
     async fn audit(&self, _dbtx: &mut DatabaseTransaction<'_>, _audit: &mut Audit) {}
 
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
-        vec![api_endpoint! {
-            "/smolfs",
-            async |_module: &SmolFS, _dbtx, _request: String| -> () {
-                Ok(())
-            }
-        }]
+        vec![
+            api_endpoint! {
+                "/smolfsget",
+                async |module: &SmolFS,dbtx, pubkey: String| -> String {
+                    let a = module.get_backups(dbtx, pubkey.clone()).await;
+                    println!("smolfs get api reply from {pubkey:?} is {a:?}");
+                    Ok(a)
+                }
+            },
+            api_endpoint! {
+                "/smolfsput",
+                async |module: &SmolFS, dbtx, params: String| -> String {
+                    let mut split_params = params.split_ascii_whitespace();
+                    let pubkey = split_params.next().unwrap();
+                    let backup = split_params.next().unwrap();
+                    let a = module.put_backups(dbtx, pubkey.to_string(), backup.to_string()).await;
+                    println!("<smolfs put api reply for {pubkey:?} {backup:?} is {a:?}>");
+                    Ok(a)
+                }
+            },
+        ]
     }
 }
 
 impl SmolFS {
     /// Create new module instance
-    pub fn new(cfg: SmolFSConfig) -> SmolFS {
+    pub async fn new(cfg: SmolFSConfig) -> SmolFS {
         SmolFS { cfg }
+    }
+
+    pub async fn put_backups(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        pubkey: String,
+        backup: String,
+    ) -> String {
+        // self.cfg.
+        let txid = sha256::Hash::hash(pubkey.clone().as_bytes()).into();
+
+        let outpoint = OutPoint {
+            txid: sha256::Hash::hash(pubkey.clone().as_bytes()).into(),
+            out_idx: 0,
+        };
+        {
+            let mut module_dbtx = dbtx.with_module_prefix(3);
+            module_dbtx
+                .insert_entry(&db::ExampleKey(pubkey.clone()), &backup)
+                .await
+                .unwrap();
+            module_dbtx
+                .insert_entry(&FinishedSmolFSEntry(outpoint), &SmolFSOutputOutcome(txid))
+                .await
+                .unwrap();
+            module_dbtx.commit_tx().await.expect("DB Error");
+        }
+        println!("generating fake smolfs entry");
+        format!("<put backups> {pubkey} {backup}")
+    }
+
+    pub async fn get_backups(&self, dbtx: &mut DatabaseTransaction<'_>, pubkey: String) -> String {
+        info!("get_backups with {}", pubkey);
+        let res: String = dbtx
+            .find_by_prefix(&ExampleKey(pubkey))
+            .await
+            .map(|res| res.expect("DB error").1)
+            .collect();
+        info!("get backups result from db is {}", res.clone());
+        res
     }
 }
 

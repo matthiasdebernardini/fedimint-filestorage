@@ -36,32 +36,50 @@ use crate::fixtures::{assert_ci, peers, test, FederationTest};
 #[tokio::test(flavor = "multi_thread")]
 async fn make_backup() -> Result<()> {
     test(4, |fed, _, _, _, _| async move {
+        let pubkey = String::from("npubA3e");
+        let backup = String::from("42");
+        let entry = SmolFSEntry { pubkey, backup };
+        // let ci = SmolFSOutputConfirmation(entry);
+        // fed.get_db_contents().await;
+        // fed.run_consensus_epochs(1).await;
+        let _ = fed.backups_for_everyone(&entry.pubkey, &entry.backup).await;
+        // fed.get_db_contents().await;
+        fed.broadcast_transactions().await;
+        fed.run_consensus_epochs(1).await;
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn module_experimenting() -> Result<()> {
+    test(4, |fed, _, _, _, _| async move {
         let entry = SmolFSEntry {
             pubkey: String::from("npubA3e"),
             backup: String::from("42"),
         };
         let ci = SmolFSOutputConfirmation(entry);
-        let a = fed
-            .cfg
-            .get_module_config(3)
-            .unwrap()
-            .local
-            .is_kind(&ModuleKind::from_static_str("smolfs"));
-        let a = fed.cfg.get_module_config(3).unwrap().local;
-        let backup = a.value().as_object().unwrap().get("backup").unwrap();
-        let pubkey = a.value().as_object().unwrap().get("pubkey").unwrap();
+        // let a = fed
+        //     .cfg
+        //     .get_module_config(3)
+        //     .unwrap()
+        //     .local
+        //     .is_kind(&ModuleKind::from_static_str("smolfs"));
+        // let a = fed.cfg.get_module_config(3).unwrap().local;
+        // let backup = a.value().as_object().unwrap().get("backup").unwrap();
+        // let pubkey = a.value().as_object().unwrap().get("pubkey").unwrap();
         // info!("{a:?}");
-        info!("backup {backup:?}");
-        info!("pubkey {pubkey:?}");
+        // info!("backup {backup:?}");
+        // info!("pubkey {pubkey:?}");
         let ci_vec = vec![ConsensusItem::Module(
             fedimint_api::core::DynModuleConsensusItem::from_typed(3, ci),
         )];
 
-        fed.get_db_contents();
+        // fed.get_db_contents().await;
+
         fed.run_consensus_epochs(1).await;
         fed.subset_peers(&[1]).override_proposal(ci_vec);
         fed.run_consensus_epochs(1).await;
-        fed.get_db_contents();
+        // fed.get_db_contents().await;
     })
     .await
 }

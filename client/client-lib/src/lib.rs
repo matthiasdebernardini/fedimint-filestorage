@@ -3,6 +3,7 @@ pub mod db;
 pub mod ln;
 pub mod mint;
 pub mod query;
+pub mod smolfs;
 pub mod transaction;
 pub mod utils;
 pub mod wallet;
@@ -39,6 +40,7 @@ use fedimint_core::modules::ln::config::LightningClientConfig;
 use fedimint_core::modules::mint::common::MintDecoder;
 use fedimint_core::modules::mint::config::MintClientConfig;
 use fedimint_core::modules::mint::{MintOutput, MintOutputOutcome};
+use fedimint_core::modules::smolfs::config::SmolFSClientConfig;
 use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::config::WalletClientConfig;
 use fedimint_core::modules::wallet::{PegOut, WalletInput, WalletOutput};
@@ -94,6 +96,7 @@ use crate::{
     api::MemberError,
     ln::{incoming::ConfirmedInvoice, LnClient},
     mint::{MintClient, SpendableNote},
+    smolfs::SmolFSClient,
     wallet::WalletClient,
 };
 
@@ -243,18 +246,17 @@ impl<T: AsRef<ClientConfig> + Clone> Client<T> {
         }
     }
 
-    pub fn smolfs_client(&self) -> WalletClient {
-        todo!();
-        // WalletClient {
-        //     config: self
-        //         .config
-        //         .as_ref()
-        //         .get_first_module_by_kind::<WalletClientConfig>("wallet")
-        //         .expect("needs wallet module client config")
-        //         .1,
+    pub fn smolfs_client(&self) -> SmolFSClient {
+        SmolFSClient {
+            config: self
+                .config
+                .as_ref()
+                .get_first_module_by_kind::<SmolFSClientConfig>("smolfs")
+                .expect("needs wallet module client config")
+                .1,
 
-        //     context: self.context.clone(),
-        // }
+            context: self.context.clone(),
+        }
     }
 
     pub fn config(&self) -> T {

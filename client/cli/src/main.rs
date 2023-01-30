@@ -29,7 +29,8 @@ use fedimint_core::modules::wallet::WalletGen;
 use fedimint_mint::common::MintDecoder;
 use fedimint_mint::MintGen;
 use mint_client::api::{
-    FederationApiExt, GlobalFederationApi, IFederationApi, WsFederationApi, WsFederationConnect,
+    FederationApiExt, GlobalFederationApi, IFederationApi, SmolFSFederationApi, WsFederationApi,
+    WsFederationConnect,
 };
 use mint_client::mint::SpendableNote;
 use mint_client::query::EventuallyConsistent;
@@ -49,6 +50,7 @@ use tracing_subscriber::EnvFilter;
 enum CliOutput {
     SmolFS {
         success: bool,
+        keybytes: String,
     },
     VersionHash {
         hash: String,
@@ -217,9 +219,12 @@ enum CommandNoWorkdir {
 }
 #[derive(Subcommand)]
 enum Command {
-    Smolfs {
+    SmolfsPut {
         pubkey: String,
         backup: String,
+    },
+    SmolfsGet {
+        pubkey: String,
     },
     /// Print the latest git commit hash this bin. was build with
     VersionHash,
@@ -465,13 +470,31 @@ async fn handle_command(
 ) -> CliResult {
     let mut task_group = TaskGroup::new();
     match cli.command {
-        Command::Smolfs { pubkey, backup } => {
-            let _a = SmolFSInput(Box::new(SmolFSEntry { pubkey, backup }));
-            info!("smolfs working");
+        Command::SmolfsPut { pubkey, backup } => {
+            info!("smolfs put");
+            let a = client.smolfs_client().add_entry(pubkey, backup).await;
 
-            Ok(CliOutput::SmolFS { success: true })
+            Ok(CliOutput::SmolFS {
+                success: true,
+                keybytes: a,
+            })
+        }
+        Command::SmolfsGet { pubkey } => {
+            info!("smolfs get");
+            // let client.db().
+            // let backup = client.smolfs_client().get_entry(pubkey).await.unwrap().unwrap();
+            // let mut dbtx = client.db().begin_transaction().await;
+            // let backup = client.smolfs_client().get_entry(&mut dbtx, pubkey.clone()).await;
+            // println!("pubkey: {} backup: {}", pubkey, backup);
+
+            Ok(CliOutput::SmolFS {
+                success: true,
+                keybytes: todo!(),
+            })
         }
         Command::Api { method, arg } => {
+            let a = format!("{method} {arg}");
+            println!("{a}");
             let arg: Value = serde_json::from_str(&arg).unwrap();
             let ws_api: Arc<_> = WsFederationApi::from_config(client.config().as_ref()).into();
             let response: Value = ws_api
