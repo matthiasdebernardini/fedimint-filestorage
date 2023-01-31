@@ -10,7 +10,7 @@ SmolFS works by having this KV store sit right next to the other transactions th
 
 It's called smolfs beacuse its meant to be used for small files, things like config files or notes. Ideally, making a client for this should be as easy as importing a library and calling one or two functions. The user would also need to have a prefered instance of a mint.
 
-To see an example of the code, you need to run the test, which can be done by calling "create_output_for_smolfs()".
+To see an example of the code, you need to run the test, which can be done by calling "create_output_for_smolfs" inside of nix shell.
 
 You'll see that it stores a KV, does a consensus round, then you are able to retrieve the data.
 
