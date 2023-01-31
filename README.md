@@ -1,32 +1,25 @@
-<h1 align="center">
-  <a href="https://fedimint.org">
-    Fedimint
-  </a>
-</h1>
+# Fedimint Smol File System
 
-<p align="center">
-    <img src="docs/logo.jpg">
-</p>
+This module aims to solve issues of how to store small files that have mission critical data and must be available at all times. It also aims to be a way to add revenue streams to any fedimint!
 
-<p align="center">
-  <a href="https://github.com/fedimint/fedimint/actions/workflows/ci-nix.yml">
-      <img src="https://github.com/fedimint/fedimint/actions/workflows/ci-nix.yml/badge.svg" alt="Github Actions CI Build Status">
-  </a>
-  <a href="https://chat.fedimint.org"><img alt="Chat for developers on Discord" src="https://img.shields.io/discord/990354215060795454?label=dev%20chat"></a>
-  <a href="https://github.com/fedimint/fedimint/discussions">
-    <img src="https://img.shields.io/badge/commmunity-discussion-blue" alt="github discussion">
-  </a>
-  <img alt="Lines of code" src="https://img.shields.io/tokei/lines/github/fedimint/fedimint">
-</p>
+This problem comes up in many kinds of software, for example lightning nodes that have to store state, exotic multisig setups that have to store XPUBs, and many more!
 
-Fedimint is a federated [Chaumian e-cash](https://en.wikipedia.org/wiki/Ecash) mint backed by bitcoin with deposits and withdrawals that can occur on-chain or via Lightning.
+SmolFS solves this problem by allowing users to submit an identifier and a binary blob. The identifier should ideally be a public key, where the seed is safely backed up. The binary blob could be the plaintext itself, however it should ideally be encrypted. A good scheme is to generate a mnemonic, get a public key, then encrypt the data with the private key. 
 
-Fedimint is alpha software. Use cautiously, with small amounts of money. There are still multiple known privacy issues.
+SmolFS works by having this KV store sit right next to the other transactions that the mint stores, so the availablitity of the data should be as good as the availablitity of the mints transactions.
 
-* <a id="community" />Community:
-  * [Telegram group](https://t.me/fedimint) for high-level non-technical discussion
-  * [Developer discord](https://chat.fedimint.org) for technical discussion
-* For developers:
-  * [Introduction for contributors](./docs/contributing.md)
-  * [Setting up dev environment](./docs/dev-env.md)
-  * [Running Fedimint for dev testing](./docs/dev-running.md)
+It's called smolfs beacuse its meant to be used for small files, things like config files or notes. Ideally, making a client for this should be as easy as importing a library and calling one or two functions. The user would also need to have a prefered instance of a mint.
+
+To see an example of the code, you need to run the test, which can be done by calling "create_output_for_smolfs()".
+
+You'll see that it stores a KV, does a consensus round, then you are able to retrieve the data.
+
+My goals for this module are twofold;
+- make a useful tool for others
+- make the simplest useful app, that shows the basics of how to interact with fedimint for other fedimint module devs.
+
+By finishing the client code, I can get the first part done. By cloning the repo and making a tutorial video, I can finish the second one.
+
+My plan is to also start a youtube channel/podcast called "Fedimint Radio" which at first would be a place for devs to learn about SysAdmin, Rust, Bitcoin and Nix. However, as fedimint grows in adoption, I would also like to interview users and guardians of fedimint. So that I can learn about their challenges and opportunities.
+
+Still so much to do with fedimint! It's been a fantastic experience for me.
