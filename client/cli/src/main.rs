@@ -22,13 +22,15 @@ use fedimint_core::config::load_from_file;
 use fedimint_core::modules::ln::common::LightningDecoder;
 use fedimint_core::modules::ln::contracts::ContractId;
 use fedimint_core::modules::ln::LightningGen;
+use fedimint_core::modules::smolfs::{SmolFSConfigGenerator, SmolFSEntry, SmolFSInput};
 use fedimint_core::modules::wallet::common::WalletDecoder;
 use fedimint_core::modules::wallet::txoproof::TxOutProof;
 use fedimint_core::modules::wallet::WalletGen;
 use fedimint_mint::common::MintDecoder;
 use fedimint_mint::MintGen;
 use mint_client::api::{
-    FederationApiExt, GlobalFederationApi, IFederationApi, WsFederationApi, WsFederationConnect,
+    FederationApiExt, GlobalFederationApi, IFederationApi, SmolFSFederationApi, WsFederationApi,
+    WsFederationConnect,
 };
 use mint_client::mint::SpendableNote;
 use mint_client::query::EventuallyConsistent;
@@ -39,6 +41,7 @@ use mint_client::utils::{
 use mint_client::{module_decode_stubs, Client, UserClientConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Serialize)]
@@ -437,6 +440,7 @@ async fn main() {
             DynModuleGen::from(WalletGen),
             DynModuleGen::from(MintGen),
             DynModuleGen::from(LightningGen),
+            DynModuleGen::from(SmolFSConfigGenerator),
         ]);
 
         let client = Client::new(cfg.clone(), decoders, module_gens, db, Default::default()).await;
@@ -468,6 +472,8 @@ async fn handle_command(
             Ok(CliOutput::SmolFS { success: true })
         }
         Command::Api { method, arg } => {
+            let a = format!("{method} {arg}");
+            println!("{a}");
             let arg: Value = serde_json::from_str(&arg).unwrap();
             let ws_api: Arc<_> = WsFederationApi::from_config(client.config().as_ref()).into();
             let response: Value = ws_api

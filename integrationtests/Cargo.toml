@@ -31,6 +31,7 @@ fedimint-rocksdb = { path = "../fedimint-rocksdb" }
 fedimint-sqlite = { path = "../fedimint-sqlite" }
 fedimint-testing = { path = "../fedimint-testing" }
 fedimint-wallet = { path = "../modules/fedimint-wallet" }
+fedimint-smolfs= { path = "../modules/fedimint-smolfs" }
 mint-client = { path = "../client/client-lib" }
 rand = "0.8"
 serde = { version = "1.0.149", features = [ "derive" ] }

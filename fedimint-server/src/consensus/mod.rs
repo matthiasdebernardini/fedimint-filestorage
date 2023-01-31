@@ -116,6 +116,7 @@ impl FedimintConsensus {
         task_group: &mut TaskGroup,
     ) -> anyhow::Result<Self> {
         let mut modules = BTreeMap::new();
+        println!("Module Inits <<{module_inits:?}>>");
 
         let env = Self::get_env_vars_map();
 

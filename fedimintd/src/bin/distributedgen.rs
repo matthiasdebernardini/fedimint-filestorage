@@ -11,6 +11,7 @@ use fedimint_api::Amount;
 use fedimint_core::modules::smolfs::SmolFSConfigGenerator;
 use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
+use fedimint_smolfs::SmolFSConfigGenerator;
 use fedimint_wallet::WalletGen;
 use fedimintd::distributedgen::{create_cert, run_dkg};
 use fedimintd::encrypt::*;

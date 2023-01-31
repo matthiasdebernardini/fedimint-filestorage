@@ -687,6 +687,35 @@ where
     }
 }
 
+#[cfg_attr(target_family = "wasm", async_trait(? Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+pub trait SmolFSFederationApi {
+    async fn fetch_backups_by_pubkey(&self, pubkey: String) -> FederationResult<Option<String>>;
+    async fn put_backups_by_pubkey(&self, params: Vec<String>) -> FederationResult<Option<String>>;
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(? Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl<T: ?Sized> SmolFSFederationApi for T
+where
+    T: IFederationApi + Send + Sync + 'static,
+{
+    async fn fetch_backups_by_pubkey(&self, pubkey: String) -> FederationResult<Option<String>> {
+        self.request_eventually_consistent(
+            "/module/3/smolfsget".to_string(),
+            erased_single_param(&pubkey),
+        )
+        .await
+    }
+    async fn put_backups_by_pubkey(&self, params: Vec<String>) -> FederationResult<Option<String>> {
+        self.request_eventually_consistent(
+            "/module/3/smolfsput".to_string(),
+            erased_multi_param(&params),
+        )
+        .await
+    }
+}
+
 /// Mint API client that will try to run queries against all `members` expecting equal
 /// results from at least `min_eq_results` of them. Members that return differing results are
 /// returned as a member faults list.

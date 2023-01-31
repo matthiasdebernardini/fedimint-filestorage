@@ -11,6 +11,7 @@ use fedimint_ln::LightningGen;
 use fedimint_mint::MintGen;
 use fedimint_server::consensus::FedimintConsensus;
 use fedimint_server::FedimintServer;
+use fedimint_smolfs::SmolFSConfigGenerator;
 use fedimint_wallet::WalletGen;
 use fedimintd::encrypt::*;
 use fedimintd::ui::run_ui;
@@ -139,6 +140,7 @@ async fn run(opts: ServerOpts, mut task_group: TaskGroup) -> anyhow::Result<()> 
         DynModuleGen::from(WalletGen),
         DynModuleGen::from(MintGen),
         DynModuleGen::from(LightningGen),
+        DynModuleGen::from(SmolFSConfigGenerator),
     ]);
 
     info!("Starting pre-check");
@@ -203,6 +205,7 @@ async fn run(opts: ServerOpts, mut task_group: TaskGroup) -> anyhow::Result<()> 
     let consensus = FedimintConsensus::new(cfg.clone(), db, module_inits, &mut task_group).await?;
 
     FedimintServer::run(cfg, consensus, decoders, &mut task_group).await?;
+    info!("<fedimint run is over>");
 
     Ok(())
 }
